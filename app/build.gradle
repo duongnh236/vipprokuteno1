@@ -11,8 +11,8 @@ android {
         applicationId 'com.fen.tsbot'
         minSdk 26
         targetSdk 35
-        versionCode 144
-        versionName 'v144'
+        versionCode 145
+        versionName 'v145'
 
         python {
             version '3.8'
@@ -24,6 +24,9 @@ android {
 
     buildTypes {
         release {
+            // Cac APK da phat hanh truoc day dung Android Debug certificate. Giu cung key de
+            // Android cho phep cap nhat de len ban cu ma khong phai go app/mat cau hinh.
+            signingConfig signingConfigs.debug
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }

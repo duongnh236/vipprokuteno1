@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageInfo;
+import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -91,11 +92,20 @@ final class UpdateManager {
                 }
                 if(done==0)throw new Exception("File APK tải về rỗng");
                 if(total>0&&done!=total)throw new Exception("APK tải chưa đủ dung lượng ("+done+" / "+total+" bytes); hãy thử lại");
-                PackageInfo archive=activity.getPackageManager().getPackageArchiveInfo(downloaded.getAbsolutePath(),0);
+                int signatureFlags=Build.VERSION.SDK_INT>=28
+                        ?android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+                        :android.content.pm.PackageManager.GET_SIGNATURES;
+                PackageInfo archive=activity.getPackageManager().getPackageArchiveInfo(downloaded.getAbsolutePath(),signatureFlags);
                 if(archive==null)throw new Exception("File Release không phải APK hợp lệ");
                 long archiveCode=Build.VERSION.SDK_INT>=28?archive.getLongVersionCode():archive.versionCode;
                 if(!activity.getPackageName().equals(archive.packageName))throw new Exception("APK Release sai package: "+archive.packageName);
                 if(archiveCode!=release.versionCode)throw new Exception("Release "+release.versionName+" nhưng APK bên trong là versionCode "+archiveCode+". Hãy đính kèm đúng APK v"+release.versionCode);
+                Signature[] updateSignatures=signaturesOf(archive);
+                if(updateSignatures.length==0)throw new Exception("APK Release chưa được ký. Không được upload file app-release-unsigned.apk");
+                PackageInfo installed=activity.getPackageManager().getPackageInfo(activity.getPackageName(),signatureFlags);
+                Signature[] installedSignatures=signaturesOf(installed);
+                if(installedSignatures.length==0||!sameSignatures(installedSignatures,updateSignatures))
+                    throw new Exception("APK Release dùng chữ ký khác bản đang cài; Android không cho phép cập nhật đè");
                 PackageInstaller installer=activity.getPackageManager().getPackageInstaller();
                 PackageInstaller.SessionParams params=new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
                 params.setAppPackageName(activity.getPackageName());
@@ -127,6 +137,26 @@ final class UpdateManager {
 
     static String currentVersionName(Context context){try{return context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName;}catch(Exception e){return "?";}}
     private static long currentVersionCode(Context context){try{android.content.pm.PackageInfo info=context.getPackageManager().getPackageInfo(context.getPackageName(),0);return Build.VERSION.SDK_INT>=28?info.getLongVersionCode():info.versionCode;}catch(Exception e){return 0;}}
+
+    private static Signature[] signaturesOf(PackageInfo info){
+        if(info==null)return new Signature[0];
+        if(Build.VERSION.SDK_INT>=28){
+            if(info.signingInfo==null)return new Signature[0];
+            Signature[] values=info.signingInfo.hasMultipleSigners()
+                    ?info.signingInfo.getApkContentsSigners()
+                    :info.signingInfo.getSigningCertificateHistory();
+            return values==null?new Signature[0]:values;
+        }
+        return info.signatures==null?new Signature[0]:info.signatures;
+    }
+
+    private static boolean sameSignatures(Signature[] first,Signature[] second){
+        if(first.length!=second.length)return false;
+        java.util.HashSet<Signature> expected=new java.util.HashSet<>();
+        java.util.Collections.addAll(expected,first);
+        for(Signature signature:second)if(!expected.contains(signature))return false;
+        return true;
+    }
 
     private static HttpURLConnection open(String url)throws Exception{HttpURLConnection c=(HttpURLConnection)new URL(url).openConnection();c.setConnectTimeout(15000);c.setReadTimeout(30000);c.setRequestProperty("Accept","application/vnd.github+json");c.setRequestProperty("User-Agent","aTSBot-Android-Updater");return c;}
     private static String readText(InputStream input)throws Exception{try(InputStream in=input){byte[] b=new byte[16384];StringBuilder s=new StringBuilder();int n;while((n=in.read(b))!=-1)s.append(new String(b,0,n,"UTF-8"));return s.toString();}}
