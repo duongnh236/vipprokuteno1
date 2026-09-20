@@ -2362,6 +2362,11 @@ def _dt_recheck_time_left(username, label):
     if used is None:
         return False                       # chua co so server -> khong doan
     left = DIGIOI_LIMIT - int(used)
+    # RoleCount cua server co the dung o 119/120 trong nhip cuoi, trong khi cong thoat da dua
+    # nhan vat ra ngoai. Khong cho nhanh recheck keo acc vao lai DG chi vi sai so mot phut nay:
+    # lan vao lai vo ich con lam cham barrier DG -> FARM cua ca team.
+    if int(used) >= DIGIOI_LIMIT - 1 and not c.in_di_gioi():
+        return False
     if left > 0:
         log.warning("[%s] DG+Train: dang cho dong doi nhung SOAT LAI thay CON %d phut DG "
                     "(server: da dung %d/%d) -> vao lai DG danh tiep",
@@ -6127,9 +6132,23 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
             #   06:02:21 (LEADER) DG+Train: co acc het gio DG -> chay DG SOLO den het gio
             #   06:02:21 Run-around quanh (970,790) / Dung run-around
             #   [im den het log]
+            # Nhanh nay co the duoc vao sau reconnect/doi pha. `exit_di_gioi()` tung pause pursuit,
+            # va roster party cu co the con trong cache; ca hai deu lam `start_run_around()` im
+            # lang return. Day la che do SOLO that su nen ha pause va roi roster cu truoc khi bat
+            # truy kich. Cac lan goi sau la idempotent.
+            c._dg_pursuit_paused = False
+            if getattr(c, "party_members", None) or (
+                    getattr(c, "party_leader", None)
+                    and getattr(c, "party_leader", None) != getattr(c, "self_entity", None)):
+                try:
+                    c.leave_party()
+                    time.sleep(0.5)
+                except Exception as e:
+                    log.warning("[%s] DG SOLO: roi roster party cu loi (bo qua): %s", label, e)
             if c.has_hp_and_sp_items():
                 c.flee_mode = False
                 c.combat_ready()
+                c.sync_area_combat_mode(allow_pursuit=True)
                 c.start_run_around()
             else:
                 c.flee_mode = True
@@ -7197,7 +7216,47 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                             _wait_party_map(dest)
                             route_completed = not route_restart["needed"] and c.current_map == dest
                         elif not route_restart["needed"]:
-                            _route_retry(f"leader chua toi BBB={dest} (dang map {c.current_map})")
+                            # Route dai co the dung hop le o mot map trung gian (vd 23802 tren
+                            # duong 23001 -> 23803). Ban cu coi day la hong, bump cmd_gen; tat ca
+                            # thread bo flow va supervisor "relogin co y", lam tan party vua lap.
+                            # Tiep tuc tu scene HIEN TAI, giu socket + roster nguyen ven.
+                            resumed = False
+                            mid_map = c.current_map
+                            if mid_map is not None and mid_map not in (source, dest):
+                                attempt = 0
+                                # GIU worker/socket song va thu lai tai cho. Neu graph tam thoi
+                                # chua san sang hoac server cham chuyen scene, reconnect khong lam
+                                # duong di tot hon ma chi pha party. Lenh moi/Stop van huy vong nay
+                                # qua `abort`, nen khong tao vong cho khong the thoat.
+                                while (c.running and not _stopped()
+                                       and st.get("cmd_gen") == gen
+                                       and c.current_map != dest
+                                       and not route_restart["needed"]):
+                                    attempt += 1
+                                    log.warning("[%s] manual route: dung map trung gian %s -> "
+                                                "tiep tuc toi BBB=%s, GIU PARTY (lan %d)",
+                                                label, mid_map, dest, attempt)
+                                    resumed = c.follow_smart_scene_route(
+                                        int(c.current_map), dest, None, abort=abort,
+                                        flee=route_flee)
+                                    if resumed and c.current_map == dest:
+                                        _wait_party_map(dest)
+                                        route_completed = (not route_restart["needed"]
+                                                           and c.current_map == dest)
+                                        break
+                                    if route_restart["needed"] or abort():
+                                        break
+                                    mid_map = c.current_map
+                                    set_account_activity(
+                                        username,
+                                        "Farm: đang thử tiếp đường từ map trung gian %s" % mid_map,
+                                        phase="route")
+                                    time.sleep(min(5.0, 1.0 + attempt))
+                            if not route_completed and not route_restart["needed"]:
+                                # Chi den day khi co Stop/lenh moi/mat socket; khong bump generation
+                                # va khong bien loi route thanh relogin co y.
+                                log.warning("[%s] manual route: chua toi BBB=%s (dang map %s) -> "
+                                            "GIU PARTY, khong reconnect", label, dest, c.current_map)
                     elif not route_restart["needed"]:
                         log.warning("[%s] manual route: chua toi AAA=%s (dang map %s) -> khong keo BBB",
                                     label, source, c.current_map)

@@ -2322,6 +2322,9 @@ class GameClient:
         # EXP hien tai cua cap nhan vat: S2C 0x05/sub0300 payload +22, UInt32 LE.
         # De None cho toi khi server gui packet; UI ghi ro nguon 0x05 de user doi chieu.
         self.char_exp = None
+        # 0x05/03 va 0x08/0e attr36 deu tra EXP tong tich luy. Giu mot baseline rieng
+        # de lay delta tung tran ma van de char_exp phuc vu UI tru moc dau cap.
+        self.char_exp_total_raw = None
         self.pet_exp_values = {}  # pet id/index -> EXP tong; S2C 0x08/sub02 cap nhat live
         # Nhat ky EXP tung account cho UI Android. Moi record giu ca raw kind de doi chieu
         # protocol: kind=1 char, kind=2 pet (can capture tran that de xac nhan kind pet).
@@ -4051,6 +4054,15 @@ class GameClient:
                     getattr(self, "pet_name", "") or "Pet đang ra trận",
                     ("+%d" % self.last_battle_pet_exp) if self.last_battle_pet_exp else "chưa xác nhận")
                 break
+            # Dòng EXP theo đối tượng được tạo chắc chắn lúc kết trận. Packet EXP có thể tới
+            # trễ vài giây, vì vậy cập nhật đúng dòng đó thay vì chỉ sửa dòng tổng kết.
+            for row in self.activity_log:
+                if row.get("type") != "battle_exp" or row.get("who") != who:
+                    continue
+                row["exp"] = int(self.last_battle_char_exp if who == "character"
+                                 else self.last_battle_pet_exp)
+                row["confirmed"] = True
+                break
 
     def _metrics_battle_end(self):
         started = self._metrics_battle_started_at
@@ -4073,8 +4085,9 @@ class GameClient:
         self.last_battle_seconds = max(0.1, time.time() - started)
         self.last_battle_char_exp = int(self._metrics_battle_char_exp)
         self.last_battle_pet_exp = int(self._metrics_battle_pet_exp)
+        _battle_time = time.strftime("%H:%M:%S")
         self.activity_log.appendleft({
-            "type": "battle_summary", "time": time.strftime("%H:%M:%S"),
+            "type": "battle_summary", "time": _battle_time,
             "message": "Trận %.1fs • %s: %s EXP • %s: %s EXP" % (
                 self.last_battle_seconds, self.char_name or self._username,
                 ("+%d" % self.last_battle_char_exp) if self.last_battle_char_exp else "chưa xác nhận",
@@ -4083,6 +4096,24 @@ class GameClient:
             "char_exp": self.last_battle_char_exp, "pet_exp": self.last_battle_pet_exp,
             "seconds": self.last_battle_seconds,
         })
+        # Luôn có hai dòng cố định/trận để UI không phụ thuộc thứ tự packet EXP và người dùng
+        # phân biệt rõ tướng với pet. exp=0 + confirmed=False nghĩa là server chưa cấp/chưa báo,
+        # không phải parser tự đoán. `_metrics_exp_gain` sẽ cập nhật nếu packet đến trễ.
+        self.activity_log.appendleft({
+            "type": "battle_exp", "time": _battle_time, "who": "character",
+            "name": self.char_name or self._username, "exp": self.last_battle_char_exp,
+            "confirmed": self.last_battle_char_exp > 0,
+        })
+        self.activity_log.appendleft({
+            "type": "battle_exp", "time": _battle_time, "who": "pet",
+            "name": getattr(self, "pet_name", "") or "Pet đang ra trận",
+            "pet": getattr(self, "pet_name", "") or "Pet đang ra trận",
+            "exp": self.last_battle_pet_exp, "confirmed": self.last_battle_pet_exp > 0,
+        })
+        if self.god_mission is not None:
+            self.activity_log.appendleft({"type": "phuc_than", "time": time.strftime("%H:%M:%S"),
+                                          "remaining": int(self.god_mission),
+                                          "message": "Sau trận còn %d lượt" % int(self.god_mission)})
         self.exp_stats_battles += 1
         self._metrics_battle_started_at = None
         self._metrics_battle_char_exp_start = None
@@ -4389,42 +4420,64 @@ class GameClient:
         if opcode == 0x0e and len(pkt) >= 13 and pkt[7:9] == b"\x11\x00":
             # S:014-017 so ban TOI DA tung co (client: Social.maxRecordFriendCount)
             self.max_friend_count = int.from_bytes(pkt[9:13], "little", signed=True)
-        if opcode == 0x08 and len(pkt) >= 15 and pkt[7:9] == b"\x01\x00":
-            # CHI SO GOC (dung cau truc client: [kind 1B][sign 1B][value i32][arg i32]).
-            # Ghi rieng, khong dung vao cac nhanh cu ben duoi.
-            _v = int.from_bytes(pkt[11:15], "little", signed=True)
-            self.char_attrs[pkt[9]] = -_v if pkt[10] == 2 else _v
+        # S:008-001 co HAI bien the dang luu hanh:
+        #   PC/TrueBot: [01][attr][sign][value i32][arg i32]
+        #   mobile moi: [01 00][attr][sign][value i32][arg i32]
+        # Parser cu chi nhan bien the mobile nen bo sot attr 0x24 (EXP tuong) tren server
+        # dang gui packet compact. Nhan ca hai, xac dinh offset bang byte attr (khong doan value).
+        _char_attr = None
+        if opcode == 0x08 and len(pkt) >= 14 and (pkt[7] == 0x01 or pkt[7:9] == b"\x0e\x00"):
+            if pkt[7:9] in (b"\x01\x00", b"\x0e\x00") and len(pkt) >= 15:
+                _char_attr, _char_sign, _char_value_off = pkt[9], pkt[10], 11
+            else:
+                _char_attr, _char_sign, _char_value_off = pkt[8], pkt[9], 10
+            _v = int.from_bytes(pkt[_char_value_off:_char_value_off + 4], "little", signed=True)
+            self.char_attrs[_char_attr] = -_v if _char_sign == 2 else _v
             # Client goc: EAttribute.Exp = 36 (0x24), attrValue la EXP TONG moi. Protocol nay
-            # moi la nguon server dang gui sau tran tren ban mobile hien tai; 0x14/sub2a khong
-            # xuat hien trong capture that. Lay delta giua hai gia tri de log EXP tung tran.
-            if pkt[9] == 0x24:
-                _new_exp = -_v if pkt[10] == 2 else _v
-                _old_exp = self.char_exp
-                self.char_exp = _new_exp
+            # tren server mobile nay den o sub0E (capture that), khong phai sub01. 0x05/03 lai
+            # la EXP TRONG CAP, nen phai giu hai bien rieng roi chi cong delta vao char_exp.
+            if _char_attr == 0x24:
+                _new_exp = -_v if _char_sign == 2 else _v
+                _old_exp = self.char_exp_total_raw
+                self.char_exp_total_raw = _new_exp
                 if _old_exp is not None and _new_exp > int(_old_exp):
                     _gain = _new_exp - int(_old_exp)
+                    if self.char_exp is not None:
+                        self.char_exp = int(self.char_exp) + int(_gain)
                     _row = {"type": "exp", "time": time.strftime("%H:%M:%S"),
                             "who": "character", "kind": 1, "exp": int(_gain),
                             "total": int(_new_exp), "source": "0x08/01 attr36"}
                     self.combat_exp_log.appendleft(dict(_row))
                     self.activity_log.appendleft(dict(_row))
                     self._metrics_exp_gain("character", _gain)
-                    log.info("[%s] EXP NHAN VAT: +%d (tong=%d, S:008-001 attr=36)",
-                             self._label, _gain, _new_exp)
+                    log.info("[%s] EXP NHAN VAT: +%d (tong=%d, S:008 attr36 sub=%s)",
+                             self._label, _gain, _new_exp, pkt[7:9].hex())
         # S:008-002 <dat thuoc tinh pet>: humanKind(1), petIndex(2), attrKind(1), sign(1),
         # value i32, arg i32. EHuman.FollowNpc=4, EAttribute.Exp=36.
-        if (opcode == 0x08 and len(pkt) >= 22 and pkt[7:9] == b"\x02\x00"
-                and pkt[9] == 4 and pkt[12] == 0x24):
-            _pet_index = int.from_bytes(pkt[10:12], "little")
-            _raw_exp = int.from_bytes(pkt[14:18], "little", signed=True)
-            _new_pet_exp = -_raw_exp if pkt[13] == 2 else _raw_exp
+        _pet_attr = None
+        if opcode == 0x08 and len(pkt) >= 17 and pkt[7] == 0x02:
+            if pkt[8] == 0x00 and len(pkt) >= 18:
+                _pet_human, _pet_index_off, _pet_attr_off, _pet_sign_off, _pet_value_off = pkt[9], 10, 12, 13, 14
+            else:
+                _pet_human, _pet_index_off, _pet_attr_off, _pet_sign_off, _pet_value_off = pkt[8], 9, 11, 12, 13
+            _pet_attr = pkt[_pet_attr_off]
+        if _pet_attr == 0x24 and _pet_human == 4:
+            _pet_index = int.from_bytes(pkt[_pet_index_off:_pet_index_off + 2], "little")
+            _raw_exp = int.from_bytes(pkt[_pet_value_off:_pet_value_off + 4], "little", signed=True)
+            _new_pet_exp = -_raw_exp if pkt[_pet_sign_off] == 2 else _raw_exp
             _old_pet_exp = self.pet_exp_values.get(_pet_index)
             self.pet_exp_values[_pet_index] = _new_pet_exp
             if _old_pet_exp is not None and _new_pet_exp > int(_old_pet_exp):
                 _gain = _new_pet_exp - int(_old_pet_exp)
-                _pet_label = (str(getattr(self, "pet_name", "") or "")
-                              if _pet_index == int(getattr(self.state, "active_pet_id", 0) or 0)
-                              else "Pet %d" % _pet_index)
+                _pet_pid = _pet_index
+                if 1 <= _pet_index <= 4:
+                    _pet_pid = int((self.pet_login_records.get(_pet_index) or {}).get("pid") or _pet_index)
+                _pet_label = next((str(name) for pid, name in (getattr(self.state, "carried_pets", []) or [])
+                                   if int(pid) == int(_pet_pid)), "")
+                if not _pet_label and _pet_pid == int(getattr(self.state, "active_pet_id", 0) or 0):
+                    _pet_label = str(getattr(self, "pet_name", "") or "")
+                if not _pet_label:
+                    _pet_label = str(getattr(config, "PET_NAMES", {}).get(_pet_pid, "") or "Pet %d" % _pet_pid)
                 _row = {"type": "exp", "time": time.strftime("%H:%M:%S"),
                         "who": "pet", "kind": 2, "exp": int(_gain),
                         "total": int(_new_pet_exp), "pet": _pet_label,
@@ -5568,6 +5621,11 @@ class GameClient:
             self.char_skill_point = int.from_bytes(body[26:28], "little")
             _old_char_exp = self.char_exp
             self.char_exp = int.from_bytes(body[22:26], "little")
+            # 0x05/03 va 0x08/0e attr36 deu la EXP tong tich luy (capture v141:
+            # 256,376,872 -> 256,382,872 -> ...). Dung ngay snapshot login lam baseline;
+            # neu cho packet 0x08/0e dau tien lam baseline se mat oan +6,000 dau tien va EXP/gio thap.
+            if self.char_exp_total_raw is None:
+                self.char_exp_total_raw = int(self.char_exp)
             # Full character refresh cung co the cap nhat EXP sau tran. Khong dem snapshot
             # login dau tien, va chi dem chenh lech duong tu tong da biet cua chinh account.
             if (self.exp_stats_started_at is not None and _old_char_exp is not None
@@ -5580,6 +5638,9 @@ class GameClient:
                 self.activity_log.appendleft(dict(_row))
                 self._metrics_exp_gain("character", _gain)
                 log.info("[%s] EXP NHAN VAT: +%d (full character refresh)", self._label, _gain)
+            # Dong bo baseline tong de packet attr36 den sau snapshot khong cong trung cung delta.
+            if self.char_exp_total_raw is None or int(self.char_exp) > int(self.char_exp_total_raw):
+                self.char_exp_total_raw = int(self.char_exp)
             log.info("[%s] CHAR login EXP hien tai (0x05 +22)=%d",
                      self._label, self.char_exp)
         if len(body) < 98:

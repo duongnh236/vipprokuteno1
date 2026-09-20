@@ -18,6 +18,38 @@ _account_slots = {}
 _selected_leader_user = None
 
 
+def _furnace_display_price(item_id, kind, name=""):
+    """Giá chip theo bảng client; lò hoàng kim dùng hệ số x2 của game."""
+    normal_kind = {3: 1, 4: 2, 6: 5}.get(int(kind), int(kind))
+    price = None
+    if normal_kind == 1:  # bí cấp
+        price = 20000
+    elif normal_kind == 5:  # kim tỏa / tướng tinh / mê
+        label = str(name or "").lower()
+        if "k.tỏa" in label or label.startswith("kim "):
+            price = 3000
+        elif "t.tinh" in label or label.startswith("tướng "):
+            price = 6000
+        elif "mê" in label:
+            price = 8000
+    elif normal_kind == 2:  # trang bị: giá theo phẩm chất trong equip_stats
+        try:
+            from train_bot.client import _load_json_data_file
+            stats = (_load_json_data_file("equip_stats.json") or {}).get("0x%04x" % int(item_id), {})
+            quality, effect, level = int(stats.get("q", 0)), int(stats.get("ev", 0)), int(stats.get("lv", 0))
+            if quality <= 0: price = 50
+            elif quality == 1: price = 260 if level >= 65 else 50
+            elif quality == 2: price = 690
+            elif effect == 105: price = 2500
+            elif effect == 103 and level >= 140: price = 2210
+            else: price = 1340
+        except Exception:
+            price = None
+    if price is not None and int(kind) in (3, 4, 6):
+        price *= 2
+    return price
+
+
 def team_debug_json():
     """Bounded coordination snapshot: no passwords, auth or raw packet payloads."""
     import re
@@ -503,7 +535,7 @@ def apply_combat_settings_json(username, pet_id=0, char_skill=0, pet_skill=0,
         if pet_id and pet_id not in pet_rows:
             raise RuntimeError("Pet da chon khong nam trong danh sach mang theo")
         pet_ids = {int(row[0]) for row in (pet_rows.get(effective_pet_id, [0, "", []])[2] or [])}
-        if pet_skill > 0 and pet_skill not in pet_ids:
+        if pet_id and pet_skill > 0 and pet_skill not in pet_ids:
             raise RuntimeError("Pet nay chua co skill da chon")
         char_rules = ([{"enabled": True, "condition": "always", "skill": "normal", "target": "auto"}]
                       if char_skill < 0 else [{"enabled": True, "condition": "mob", "op": "gte",
@@ -515,8 +547,17 @@ def apply_combat_settings_json(username, pet_id=0, char_skill=0, pet_skill=0,
                        "value": pet_mob_min, "skill": pet_skill, "target": "auto"},
                       {"enabled": True, "condition": "always", "skill": "normal",
                        "target": "auto"}] if pet_skill else [])
-        battle = {"char": char_rules,
-                  "pets": {str(effective_pet_id): pet_rules} if effective_pet_id and pet_rules else {}}
+        # Giu rule cua toi da 4 pet da cau hinh truoc do. Moi lan UI luu mot pet chi cap nhat
+        # dung pet do; khong xoa ba pet con lai (Di Gioi co the dua ca 4 pet vao tran).
+        previous_battle = (_restore_account_settings(username).get("battle") or {})
+        saved_pet_rules = dict(previous_battle.get("pets") or {})
+        # pet_id=0 nghia la UI dang luu tab Tuong: tuyet doi khong xoa rule pet dang ra tran.
+        if pet_id:
+            if pet_rules:
+                saved_pet_rules[str(effective_pet_id)] = pet_rules
+            else:
+                saved_pet_rules.pop(str(effective_pet_id), None)
+        battle = {"char": char_rules, "pets": saved_pet_rules}
         runner.apply_account_battle(username, battle)
         runner.apply_account_heal(username, {"hp_char": hp, "sp_char": sp,
                                              "hp_pet": pet_hp, "sp_pet": pet_sp})
@@ -574,7 +615,7 @@ def account_action_json(username, action, payload="{}"):
         if client is None or not getattr(client, "running", False):
             raise RuntimeError("Account chưa online")
         if action in {"buy_ho_phu", "buy_bao_hop", "gacha_pet", "gacha_card",
-                      "furnace_buy", "combine", "discard"} and client.in_combat(idle_secs=1.0):
+                      "furnace_buy", "combine", "discard", "use_item"} and client.in_combat(idle_secs=1.0):
             raise RuntimeError("Đang trong trận, hãy chờ kết thúc trận rồi thử lại")
         if action == "buy_ho_phu":
             client.buy_di_gioi_ho_phu(); message = "Đã gửi mua Dị Giới Hộ Phù"
@@ -593,6 +634,14 @@ def account_action_json(username, action, payload="{}"):
             slot = int(data.get("slot", 0)); qty = max(1, int(data.get("qty", 1)))
             if not client.discard_item(slot, qty): raise RuntimeError("Vật phẩm đang khóa hoặc server không nhận")
             message = "Đã gửi vứt vật phẩm"
+        elif action == "use_item":
+            slot = int(data.get("slot", 0)); qty = max(1, min(255, int(data.get("qty", 1))))
+            rec = (client.bag_slots or {}).get(slot)
+            if not rec: raise RuntimeError("Vật phẩm đã đổi slot hoặc không còn trong túi")
+            if client.item_locked(slot): raise RuntimeError("Vật phẩm đang khóa")
+            qty = min(qty, int(rec[1]))
+            if not client.use_slot(slot, target=0, qty=qty): raise RuntimeError("Server không nhận lệnh dùng vật phẩm")
+            message = "Đã gửi dùng %d vật phẩm" % qty
         elif action == "toggle_lock":
             slot, locked = int(data.get("slot", 0)), bool(data.get("locked", True))
             client.set_item_lock(slot, locked)
@@ -1454,9 +1503,18 @@ def accounts_dashboard_json():
                 furnace = {"base_rate": raw_furnace.get("base_rate"),
                            "active_rate": raw_furnace.get("active_rate"), "tabs": {}}
                 for kind, items in (raw_furnace.get("tabs") or {}).items():
-                    furnace["tabs"][str(kind)] = [dict(item,
-                        name=(names.get(int(item.get("id", 0))) or {}).get("name") or
-                             ("0x%04x" % int(item.get("id", 0)))) for item in items if item.get("id")]
+                    rows = []
+                    for item in items:
+                        if not item.get("id"):
+                            continue
+                        item_name = ((names.get(int(item.get("id", 0))) or {}).get("name") or
+                                     ("0x%04x" % int(item.get("id", 0))))
+                        row = dict(item, name=item_name)
+                        item_price = _furnace_display_price(item.get("id", 0), kind, item_name)
+                        if item_price is not None:
+                            row["price"] = item_price
+                        rows.append(row)
+                    furnace["tabs"][str(kind)] = rows
             quest_cells = set(getattr(client, "_quest_cells", set()) or ()) if client is not None else set()
             result.append({
                 "user": username,
