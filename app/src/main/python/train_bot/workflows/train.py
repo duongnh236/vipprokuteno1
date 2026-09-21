@@ -31,7 +31,7 @@ def _android_train_recovery_tick(c, st, username, pidx, stopped_fn, *, services)
     if not target or stopped_fn() or (st.get("cmd") or (None,))[0] != "train":
         return False
     if st.get("train_channel_regroup"):
-        from .channel_regroup import tick
+        from .channel import tick
         return tick(c, st, username, pidx, stopped_fn, services=services)
     getattr(c, "sync_machinebox_flags", lambda: None)()
     leader_user = config.PARTY_LEADER_ACC.get(pidx)
@@ -48,7 +48,7 @@ def _android_train_recovery_tick(c, st, username, pidx, stopped_fn, *, services)
                     and peer.current_channel and c.current_channel
                     and peer.current_channel != c.current_channel
                     and bytes(getattr(peer, "self_entity", None) or b"") not in roster):
-                from .channel_regroup import request, tick
+                from .channel import request, tick
                 request(st, member, generation, "Thành viên ở khác phân khu, chưa vào party leader")
                 return tick(c, st, username, pidx, stopped_fn, services=services)
     if st.get("ui_leader_recover"):
@@ -96,7 +96,7 @@ def _android_train_recovery_tick(c, st, username, pidx, stopped_fn, *, services)
                 return True
             if c.current_channel != leader.current_channel:
                 if not c.switch_channel(leader.current_channel, wait=6.0, retries=1, theo_lenh=True):
-                    from .channel_regroup import request
+                    from .channel import request
                     request(st, username, generation, "Không chuyển được tới phân khu leader")
                     set_account_activity(username, "Reconnect: khu leader chưa vào được, thử lại", phase="wait")
                     return True
@@ -228,7 +228,7 @@ def _train_retry_leader_channel(c, st, username, label, generation, stopped_fn, 
                 # Caller waits for every city-sync result, then all walk outside.
                 set_account_activity(username, "Farm: khu thành không chuyển được, chờ team ra ngoài lập party", phase="wait")
                 return False
-            from .channel_regroup import request
+            from .channel import request
             request(st, username, generation, "Server từ chối chuyển khu: %s" % code)
             set_account_activity(username, "Farm: không sang được khu leader, chờ gom lại từ safe", phase="wait")
             return False
@@ -253,23 +253,9 @@ def _train_retry_leader_channel(c, st, username, label, generation, stopped_fn, 
 
 
 def _farm_party_missing(pidx, users, leader, skip=(), *, services):
-    """Verify exact participants against the leader's SERVER roster, not local ACK count."""
-    account_clients = services.account_clients
-    config = services.config
-    roster = {bytes(e) for e in (getattr(leader, "party_members", None) or [])}
-    missing = []
-    leader_user = config.PARTY_LEADER_ACC.get(pidx)
-    for user in users:
-        if user == leader_user or user in skip:
-            continue
-        client = account_clients.get(user)
-        if (client is None or not client.running
-                or client.current_map != leader.current_map
-                or getattr(client, "current_channel", None) != getattr(leader, "current_channel", None)
-                or not getattr(client, "self_entity", None)
-                or bytes(client.self_entity) not in roster):
-            missing.append(user)
-    return missing
+    """Train adapter; exact roster ownership lives in workflows.party."""
+    from .party import missing_from_server_roster
+    return missing_from_server_roster(pidx, users, leader, skip, services=services)
 
 
 def party_train_map(pidx, map_id, x, y, *, services, expected_generation=None):

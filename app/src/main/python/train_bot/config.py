@@ -212,7 +212,7 @@ SCENE_FIGHT_PATH = _data_file("gamedata/SceneFight_C.dat")
 WORLD_NAV_PATH = _data_file("world_nav.json")
 SMART_ROUTE_CACHE_PATH = os.path.join(_base_dir(), "smart_routes.json")
 SMART_ROUTE_FALLBACK = True
-SMART_PATH_STEP_WAIT = 0.55     # giay giua 2 lenh move khi co Ground.mmg path (giam = chay muot hon)
+SMART_PATH_STEP_WAIT = 0.275    # Truy kich: giam 1/2 nhịp move; van tren nguong flood/kick 0.1s
 SMART_PATH_SEGMENT = 100        # px toi da moi lenh move smart path; chia nho de khong spam 1 diem cua
 MOB_SCAN_ENABLED = True
 MOB_SCAN_STATION_STRIDE = (320, 240)
@@ -317,7 +317,7 @@ DIGIOI_MAP_ID = 49942           # map_id Di Gioi (0xc316) - doc tu broadcast de 
 # Auto run-around: chay vong quanh DIEM DANG DUNG (offset tuong doi). Hinh so 8 (tu game auto-run).
 RUN_AROUND_OFFSETS = [(-100, -100), (-200, 0), (-100, 100), (0, 0),
                       (100, -100), (200, 0), (100, 100), (0, 0)]
-RUN_STEP_WAIT = 0.7            # giay moi buoc chay vong Di Gioi (giam = chay nhanh hon; <0.1 de bi flood/kick)
+RUN_STEP_WAIT = 0.35           # Truy kich: giam 1/2 thoi gian cho giua cac diem trong vong
 
 # Solo daily dungeon: so luot/ngay (luot 1 mien phi, luot 2+ MUA bang vang). =1 chi danh luot free.
 DUNGEON_RUNS_PER_DAY = 2

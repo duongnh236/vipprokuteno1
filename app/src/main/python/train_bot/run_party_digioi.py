@@ -2478,6 +2478,12 @@ def _workflow_services():
         "_pstate": _pstate,
         "_workflow_leave_current_area": _workflow_leave_current_area,
         "account_clients": account_clients,
+        "account_forced_reconnect": account_forced_reconnect,
+        "account_forced_reconnect_reason": account_forced_reconnect_reason,
+        "account_reconnect": account_reconnect,
+        "account_stop_reasons": account_stop_reasons,
+        "account_stops": account_stops,
+        "account_threads": account_threads,
         "config": config,
         "dat_party_dang_gom": dat_party_dang_gom,
         "is_account_running": is_account_running,
@@ -2983,14 +2989,28 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
         # chay ve safe TRUOC cac viec login chores (qua, van tieu, shop...) de khoi dung giua bai
         # quai lau roi bi keo tran.
         pcfg = getattr(config, "PARTY_CONFIG", {}).get(pidx, {})
+        _workflow_session = st.get("android_workflow_session")
+        _workflow_kind = (getattr(_workflow_session, "kind", None)
+                          if _workflow_session is not None
+                          and getattr(_workflow_session, "active", False) else None)
         _ui_pending_train = ((st.get("ui_train_dispatch_gen") == st.get("cmd_gen")
                               and st.get("ui_train_phase") != "farming")
                              or (is_reconnect and bool(st.get("ui_train_target"))))
+        _isolated_train_dg = bool(
+            _workflow_kind in ("train", "digioi")
+            or _ui_pending_train or st.get("ui_train_target") or st.get("ui_dg_train_target")
+            or pcfg.get("mode") in ("train", "digioi", "digioi_train")
+        )
         if _ui_pending_train or st.get("daily_active"):
             # Reconnect resumes the GUI command, NOT the old native DG/train startup route.
             pcfg = dict(pcfg, mode="stand", start_city_id=0, train_pick="", do_daily=False,
                         auto_world_boss=False, auto_team_dungeon=False, fight_legion_boss=False,
                         do_van_tieu=False)
+        if _isolated_train_dg:
+            # TRAIN/DG own the account exclusively. Daily is an explicit Android workflow, not
+            # a login chore and not a phase hidden inside gather/reform/handoff.
+            pcfg = dict(pcfg, do_daily=False, auto_world_boss=False,
+                        auto_team_dungeon=False, fight_legion_boss=False)
         # NHOM "TU DON TUI DO" phai gan NGAY O DAY (khong de xuong duoi cung voi cac config khac):
         # decompose_junk_scrolls() / discard_junk_items() / sell_noi_dat() duoc goi trong khoi
         # "viec hang ngay sau login" o TREN cho gan config cu -> luc do co van la mac dinh
@@ -3217,7 +3237,10 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
             # lap party) -> danh duoc. Trong phien: keepalive trigger REFORM khi con luot (xem duoi).
             # Mode EVENT (40NPC): mac dinh KHONG danh boss quan doan (acc event chuyen tam cho event,
             # khong di lang thang danh boss lam tre vao event).
-            if pcfg.get("mode") == "event":
+            if _isolated_train_dg:
+                log.info("[%s] (%s) workflow %s doc lap -> bo qua boss quan doan login",
+                         label, role, _workflow_kind or pcfg.get("mode"))
+            elif pcfg.get("mode") == "event":
                 log.info("[%s] (%s) mode event -> bo qua boss quan doan (mac dinh)", label, role)
             else:
                 try: c.do_legion_boss()
@@ -3232,6 +3255,8 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
         do_daily = pcfg.get("do_daily", pcfg.get("do_dungeon", True))
         auto_world_boss = pcfg.get("auto_world_boss", True)
         auto_team_dungeon = pcfg.get("auto_team_dungeon", True)
+        if _isolated_train_dg:
+            do_daily = auto_world_boss = auto_team_dungeon = False
         # Mode EVENT (40NPC): mac dinh KHONG lam daily quest (acc event chuyen tam vao event ngay,
         # khong di lang thang lam bingo/pho ban -> vao event nhanh, khong bi dump khoi map event).
         if pcfg.get("mode") == "event":
@@ -3405,37 +3430,6 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 pass
             return None
 
-        def _maybe_auto_world_boss(reason: str):
-            try:
-                if auto_world_boss:
-                    # KHONG HOAN THEO LENH DIEU PHOI NUA (user chot 14/09).
-                    #
-                    # Cua hoan cu (`_dieu_phoi_dang_ra_lenh`) dat dung vao THOI DIEM LUON DANG GOM:
-                    # viec nay chi chay o login chores, ma luc moi login thi 250 acc dung o 250 cho
-                    # khac nhau -> dieu phoi ra lenh gom -> HOAN -> va vi chi chay MOT LAN, mat luot
-                    # CA NGAY. Restart bao nhieu lan cung the.
-                    #
-                    # Do tren log 14/09, sau khi restart 251 acc luc 22:31:46:
-                    #   PB don : 109 acc bi HOAN |  2 acc danh duoc luot
-                    #   WB     : 162 acc bi HOAN | 51 acc vao danh
-                    # Ca ngay: 2739 lan `Boss the gioi: HOAN`, 3224 lan `Dungeon: HOAN`;
-                    # o 1 (PB don) chi 14/152 acc sang duoc -> 96% acc khong xong nhiem vu ngay.
-                    #
-                    # GIO AN TOAN HON TRUOC: hai viec nay bao pha `PHASE_LOGIN_CHORE`, ma dieu phoi
-                    # da KHONG con tinh acc dang viec vat vao phep do lech map/kenh, con loi moi
-                    # party thi duoc GIU lai den khi xong viec. Nen acc di danh khong lam party
-                    # "hong" nhu truoc.
-                    log.info("[%s] Boss the gioi: auto danh het luot (%s)", label, reason)
-                    c.do_world_boss_all()
-            except Exception as e:
-                log.warning("[%s] loi auto world boss (%s): %s", label, reason, e)
-            finally:
-                # DANH DAU DA XONG - leader cho co nay truoc khi lap pho ban (xem
-                # _wait_party_world_boss). Dat trong `finally` de loi/tat boss van danh dau,
-                # khong thi ca party treo cho mot acc khong bao gio bao xong.
-                with st["lock"]:
-                    st.setdefault("wb_done", set()).add(username)
-
         def _ket_thuc_pha_dg():
             """Doi pha DG -> train: GIU ket noi neu duoc, khong thi dong nhu cu.
 
@@ -3531,35 +3525,10 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 return False
             if not _wait_res:
                 return False
-            # Daily/team dungeon can require the whole party. Run it only after every account
-            # has finished DG, otherwise an early member can wait for leader while leader is
-            # still trying to form the DG party.
-            _maybe_auto_world_boss("sau DG, truoc pho ban doi")
-            if auto_team_dungeon:
-                if not _run_auto_team_dungeons_if_needed(c, st, username, label, pidx,
-                                                         is_leader, _stopped, pcfg):
-                    # PB HONG KHONG PHAI LY DO DE GIET PARTY. DG da het gio -> viec tiep theo LUON
-                    # la TRAIN, du viec vat co xong hay khong.
-                    # BUG THAT (party 19, 13:46-13:57): rule "phai du pt moi danh PB" huy tran vi
-                    # roster chi 1/4 member -> ham nay `return False` -> _dt["relogin_train"] khong
-                    # duoc set -> reconnectable=False -> st["leader_gone"].set() -> member thay
-                    # leader chet that -> THOAT THEO -> CA PARTY CHET, phai bat tay lai.
-                    # ... va KHONG duoc `return` o day: `do_daily_dungeon()` (o 1) nam ngay duoi.
-                    # BUG THAT (party 19 quan_vu, 02/09): PB lv80 hong vi ca party moi lv68 ->
-                    # `return` -> o 1 KHONG BAO GIO duoc lam. Pha train cung khong va lai duoc
-                    # (`_do_startup_daily` chi goi `claim_daily_quests`, khong goi
-                    # `do_daily_dungeon`) -> cuoi ngay 6 acc dung o `o xong=[2..9]`, thieu dung o 1.
-                    log.warning("[%s] (%s) pho ban to doi khong xong -> VAN chuyen sang pha TRAIN "
-                                "(khong bo party), van lam not nhiem vu ngay", label, role)
-            if do_daily:
-                try:
-                    c.do_daily_dungeon()
-                except Exception as e:
-                    log.warning("[%s] loi daily dungeon (bo qua): %s", label, e)
-                try:
-                    c.claim_daily_quests(heavy=True)
-                except Exception as e:
-                    log.warning("[%s] loi claim daily quest (bo qua): %s", label, e)
+            # Workflow boundary: DG hands off DIRECTLY to TRAIN. Boss/Dungeon/Daily may only run
+            # from the explicit Daily command, never between these two workflows.
+            log.info("[%s] (%s) DG xong -> ban giao THANG sang TRAIN, khong chen Daily/Boss/PB",
+                     label, role)
             _dt["relogin_train"] = True   # supervisor chay lai -> pha TRAIN
             return True
 
@@ -3760,10 +3729,9 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
         # 115/115 acc digioi_train deu dung o `o xong=[3,4,6,7,8]` (chi con cac o NHE tu keepalive).
         _chuyen_pha = reuse_client is not None
         _lan_dau = (not is_reconnect) or _chuyen_pha
-        _do_startup_world_boss = bool(auto_world_boss and not is_digioi and _lan_dau)
         _do_startup_team = bool(auto_team_dungeon and not is_digioi and (_lan_dau or _td_redo))
         _do_startup_daily = bool(not is_digioi and do_daily and (_lan_dau or _o5_redo))
-        if _do_startup_world_boss or _do_startup_team or _do_startup_daily:
+        if _do_startup_team or _do_startup_daily:
             if mode == "city":
                 try:
                     if (_ve_thanh_tap_trung(c, pidx, label, sc, city_flag)
@@ -3780,8 +3748,6 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
             elif mode == "stand" and train_safes and login_map == sc:
                 c.navigate_to(*_nearest_safe(c.pos, train_safes))       # stand map co safe -> ra safe
             # stand map la / khong co safe -> lam tai cho (ke me)
-            if _do_startup_world_boss:
-                _maybe_auto_world_boss("login, truoc pho ban doi")
             if _do_startup_team:
                 if (not _run_auto_team_dungeons_if_needed(c, st, username, label, pidx,
                                                           is_leader, _stopped, pcfg)
@@ -3797,7 +3763,7 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 # -> Dang o bai train ma KHONG bat world boss thi lam nhiem vu NHE thoi (gacha,
                 # hop vat pham, claim) - toan viec khong roi cho. Bat world boss thi heavy=True
                 # nhu cu (luc do tele la DUNG y user).
-                _heavy = bool(auto_world_boss) or not train_on_map
+                _heavy = not train_on_map
                 if not _heavy:
                     log.info("[%s] (%s) o bai train + KHONG bat boss the gioi -> nhiem vu hang ngay "
                              "lam phan NHE thoi, khong teleport di dau", label, role)
@@ -5668,7 +5634,6 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 # ket tran lien tuc -> teleport boss/dungeon luc dang danh bi server KICK. Ve thanh
                 # an toan roi moi lam dailies.
                 _go_town_safe(c, label)
-                _maybe_auto_world_boss("het gio DG luc login, truoc pho ban doi")
                 if auto_team_dungeon:
                     if (not _run_auto_team_dungeons_if_needed(c, st, username, label, pidx,
                                                               is_leader, _stopped, pcfg)
@@ -5761,7 +5726,6 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                     _ket_thuc_pha_dg()
                     return
                 _go_town_safe(c, label)   # ve thanh truoc (thoat o quai) roi lam dailies
-                _maybe_auto_world_boss("khong vao duoc DG, truoc pho ban doi")
                 if auto_team_dungeon:
                     if (not _run_auto_team_dungeons_if_needed(c, st, username, label, pidx,
                                                               is_leader, _stopped, pcfg)
@@ -7560,16 +7524,19 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                         with st["lock"]:
                             st["daily_task"] = task
                             st["daily_message"] = "Đang chạy %s" % _daily_labels.get(str(task), str(task))
-                        if task == "legion_boss":
-                            set_account_activity(username, "Daily: boss quan doan", phase="daily")
-                            # Nut "Chay cac Daily da tick" la lenh thu cong ro rang cua nguoi dung.
-                            # Khong de setting boss tu dong (mac dinh tat) chan im lang lenh nay.
-                            c.do_legion_boss(force=True)
-                        elif task == "world_boss":
-                            set_account_activity(username, "Daily: boss the gioi", phase="daily")
-                            c.do_world_boss_all(cho_phep=lambda: (
-                                "user da bam Dung Daily" if st.get("daily_cancel", False)
-                                else None))
+                        if task in ("legion_boss", "world_boss"):
+                            from .workflows.boss import run_selected as run_daily_boss
+                            set_account_activity(
+                                username,
+                                "Daily: boss quan doan" if task == "legion_boss"
+                                else "Daily: boss the gioi",
+                                phase="daily")
+                            _boss_result = run_daily_boss(
+                                c, task,
+                                session=st.get("android_workflow_session"),
+                                stopped=lambda: (_stopped() or st.get("daily_cancel", False)))
+                            if not _boss_result.completed:
+                                raise RuntimeError(_boss_result.message or _boss_result.status)
                         elif task == "solo_dungeon":
                             set_account_activity(username, "Daily: pho ban don", phase="daily")
                             c.do_daily_dungeon(cho_phep=lambda: (
@@ -7580,9 +7547,7 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                             set_account_activity(username, "Daily: pho ban to doi", phase="daily")
                             _daily_cfg = dict(pcfg)
                             _daily_cfg["auto_team_dungeon"] = True
-                            # Daily tay da co barrier cho TOAN DOI sau boss the gioi. Khong cho
-                            # _run_auto_team_dungeons_if_needed doi them wb_done cua luong auto:
-                            # luong tay khong set co do nen leader se cho gia vo han/5 phut.
+                            # Daily co barrier rieng theo tung task; dungeon khong doc trang thai boss.
                             _daily_cfg["manual_daily_barrier_done"] = True
                             if team_levels:
                                 _daily_cfg["team_dungeons"] = {
@@ -8833,7 +8798,6 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                                     label, role, "" if (do_daily and not dt_mode) else " (doi DG+Train/tat dungeon)")
                         if not dt_mode:
                             _go_town_safe(c, label)
-                            _maybe_auto_world_boss("het gio DG, truoc pho ban doi")
                             if auto_team_dungeon:
                                 _run_auto_team_dungeons_if_needed(c, st, username, label, pidx,
                                                                   is_leader, _stopped, pcfg)
@@ -8880,7 +8844,6 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                                         " + solo daily dungeon" if (do_daily and not dt_mode) else "")
                             if not dt_mode:
                                 _go_town_safe(c, label)
-                                _maybe_auto_world_boss("het gio DG, truoc pho ban doi")
                                 if auto_team_dungeon:
                                     _run_auto_team_dungeons_if_needed(c, st, username, label, pidx,
                                                                       is_leader, _stopped, pcfg)
@@ -9018,45 +8981,25 @@ def _leader_live_phase(pidx, st):
 
 
 def party_accounts(pidx):
-    """List (username, password, is_leader, is_picker) cua party pidx (bo slot trong)."""
-    party = config.PARTIES[pidx]
-    leader_acc = config.PARTY_LEADER_ACC.get(pidx)
-    valid = [(u, p) for u, p in party if u and u.strip()]
-    picker_acc = leader_acc if leader_acc else (valid[0][0] if valid else None)
-    return [(u, p, u == leader_acc, u == picker_acc) for u, p in valid]
+    """Compatibility API; party ownership lives in workflows.party."""
+    from .workflows.party import accounts
+    return accounts(pidx, services=_workflow_services())
 
 
 def _clear_o5_client_flags(c):
-    """Ha co RIENG cua mot acc (dang o trong instance / quest_mode). Pha PB cua CA PARTY thi khong
-    nam o day nua - no do dieu phoi giu (`dat_pha_pho_ban`, xem `bot/client._PARTY_PB_PHA`)."""
-    active = (
-        time.time() < getattr(c, "_team_dungeon_until", 0.0)
-        or getattr(c.state, "quest_mode", False)
-    )
-    c._team_dungeon_until = 0.0
-    c.state.quest_mode = False
-    return active
+    """Compatibility API; dungeon ownership lives in workflows.dungeon."""
+    from .workflows.dungeon import clear_client_flags
+    return clear_client_flags(c, services=_workflow_services())
 
 
 def _team_dungeon_flags(pcfg):
-    norm = getattr(config, "normalize_team_dungeons", lambda v: v)(pcfg.get("team_dungeons"))
-    if not isinstance(norm, dict):
-        norm = getattr(config, "DEFAULT_TEAM_DUNGEONS", {20: True, 50: True, 80: True})
-    return {int(k): bool(v) for k, v in norm.items()}
+    from .workflows.dungeon import selected_levels
+    return selected_levels(pcfg, services=_workflow_services())
 
 
 def _force_supervisor_reconnect(username, c, reason):
-    if getattr(c, "_daily_use_selected_pet", False) and getattr(c, "running", False):
-        c._daily_instance_blocked = True
-        log.warning("[%s] Daily yêu cầu phục hồi (%s): giữ online, không ép reconnect", username, reason)
-        return False
-    account_forced_reconnect.add(username)
-    account_forced_reconnect_reason[username] = reason
-    try:
-        c.close()
-    except Exception:
-        pass
-    return False
+    from .workflows.reconnect import force_supervisor
+    return force_supervisor(username, c, reason, services=_workflow_services())
 
 
 def _stop_all_accounts_for_maintenance(trigger_username=""):
@@ -9066,22 +9009,8 @@ def _stop_all_accounts_for_maintenance(trigger_username=""):
     Nguoi dung van co the bam Login lai sau khi bao tri ket thuc; start_account se tao stop Event
     moi cho phien moi.
     """
-    log.error("[BAO TRI] server gui ma 60 cho %s -> OFF TAT CA ACCOUNT, KHONG RECONNECT",
-              trigger_username or "mot account")
-    for user, ev in list(account_stops.items()):
-        account_stop_reasons[user] = "Server bao tri (ma 60) - da off tat ca account"
-        try:
-            ev.set()
-        except Exception:
-            pass
-        account_reconnect[user] = False
-        account_forced_reconnect.discard(user)
-        account_forced_reconnect_reason.pop(user, None)
-    for _user, cli in list(account_clients.items()):
-        try:
-            cli.close()
-        except Exception:
-            pass
+    from .workflows.reconnect import stop_all_for_maintenance
+    return stop_all_for_maintenance(trigger_username, services=_workflow_services())
 
 
 def _thoat_pb_ca_party(pidx, ly_do):
@@ -9159,7 +9088,7 @@ def _exit_pb_or_reconnect(username, c, reason):
 # (XOA 13/09 `READY_WAIT_SPLIT_SEC`: nguong de LEADER tu quyet luc nao gom party lech map. Lech
 #  map la viec cua dieu phoi - no doc map ca party moi 2 giay va ra lenh gom.)
 READY_WAIT_REFORM_SEC = 120  # moi mai khong du party -> bo luot moi nay, de dieu phoi quyet tiep
-TEAM_DUNGEON_MAX_TRIES = 2   # 1 lan dau + 1 lan RETRY. Qua so nay -> BO QUA HET cac PB.
+from .workflows.dungeon import TEAM_DUNGEON_MAX_TRIES
 
 
 def _mark_team_dungeon_broken(st, level):
@@ -9171,15 +9100,8 @@ def _mark_team_dungeon_broken(st, level):
     # _mark deu clear recover_seen -> acc phat hien PB vo TRE (thuong leader o 4231) clear MAT nhung
     # member da qua barrier (_prepare da add seen roi vao vong cho) -> ket "4/5" vo tan, khong bao gio
     # du 5. Ngoai ra tries + 1/acc lam skip_all som. Guard bang need_redo (moi caller deu giu st.lock).
-    fresh = not st.get("team_dungeon_need_redo")
-    if fresh:
-        tries = st.setdefault("team_dungeon_tries", {})
-        tries[level] = tries.get(level, 0) + 1
-        if tries[level] >= TEAM_DUNGEON_MAX_TRIES:
-            st["team_dungeon_skip_all"] = True
-    st.setdefault("team_dungeon_broke", {})[level] = True
-    st["team_dungeon_need_redo"] = True
-    st.setdefault("team_dungeon_state", {})[level] = "done"
+    from .workflows.dungeon import mark_broken
+    return mark_broken(st, level)
 
 
 def _pb_vo_don_lai(st, pidx, label):
@@ -9571,42 +9493,6 @@ def _pb_that_bai_co_phai_dung_han(c, stopped_fn, label, role):
     return False
 
 
-WB_WAIT_SEC = 300.0     # cho toi da 5' - 1 luot boss ~20s, du cho ca 5 acc danh het luot
-
-
-def _wait_party_world_boss(st, pidx, label, stopped_fn):
-    """LEADER cho CA PARTY danh xong boss the gioi roi moi lap pho ban to doi.
-
-    BUG THAT (log 15:09, party tq4xx): moi acc chay DOC LAP - ai da du 5/5 luot thi xong ngay, con
-    tq402 con 0/5 nen dang danh (moi tran ~20s). Leader thay minh xong la lap phong PB va moi luon
-    -> tq402 nhan loi moi + an CHUAN BI trong luc DANG TRONG TRAN boss -> khong vao duoc instance ->
-    "roster phong pho ban chi 3/4 member" -> HUY danh, ca party thoat ra lam lai.
-
-    Cho theo CO wb_done (dat trong finally cua _maybe_auto_world_boss) chu KHONG theo "dang trong
-    tran": acc co the giua 2 luot boss, luc do khong o trong tran nhung van chua xong viec.
-    """
-    t0 = time.time()
-    _log = 0.0
-    while not stopped_fn():
-        con = [u for u, _p, _l, _k in party_accounts(pidx)
-               if is_account_running(u) and account_clients.get(u) is not None
-               and u not in (st.get("wb_done") or ())]
-        if not con:
-            return True
-        if time.time() - t0 > WB_WAIT_SEC:
-            log.warning("[%s] (LEADER) cho boss the gioi qua %.0fs ma con %s -> lap pho ban luon",
-                        label, WB_WAIT_SEC, con)
-            return False
-        if time.time() - _log > 20:
-            _log = time.time()
-            log.info("[%s] (LEADER) CHO %d acc danh xong boss the gioi roi moi lap pho ban: %s",
-                     label, len(con), con)
-        set_account_activity(st.get("leader_user") or label,
-                             "cho party xong boss the gioi", phase="wait")
-        time.sleep(2)
-    return False
-
-
 def _run_auto_team_dungeons_if_needed(c, st, username, label, pidx, is_leader, stopped_fn, pcfg):
     # DAU VET tren CHINH CLIENT (bot dieu khien acc nen bot BIET no da xong o5 chua) - khong ghi
     # vao bang cap party de acc khac phai doc "bao cao".
@@ -9626,8 +9512,6 @@ def _run_auto_team_dungeons_if_needed(c, st, username, label, pidx, is_leader, s
         log.warning("[%s] loi doi qua/bang su kien truoc pho ban doi (bo qua): %s", label, e)
     if not pcfg.get("auto_team_dungeon", True):
         return True
-    if is_leader and not pcfg.get("manual_daily_barrier_done"):
-        _wait_party_world_boss(st, pidx, label, stopped_fn)
     flags = _team_dungeon_flags(pcfg)
     levels = getattr(config, "TEAM_DUNGEON_LEVELS", (20, 50, 80))
     # Bo qua CHI LUOT CHAY NAY: doc xong la XOA co ngay. Luot chay moi (login/chu ky sau) lai

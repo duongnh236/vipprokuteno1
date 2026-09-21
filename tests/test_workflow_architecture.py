@@ -11,6 +11,7 @@ from unittest.mock import Mock
 ROOT = Path(__file__).resolve().parents[1] / "app/src/main/python"
 sys.path.insert(0, str(ROOT))
 from train_bot.workflows.lifecycle import WorkflowCoordinator, activate, activate_locked
+from train_bot.workflows import boss
 from train_bot.diagnostic_lock import WorkflowLock
 
 
@@ -33,6 +34,18 @@ def bounded(fn):
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_boss_executes_only_for_active_daily_session(self):
+        client = Mock()
+        inactive = SimpleNamespace(active=False)
+        cancelled = boss.run_selected(client, "world_boss", session=inactive)
+        self.assertEqual(cancelled.status, "cancelled")
+        client.do_world_boss_all.assert_not_called()
+
+        active = SimpleNamespace(active=True)
+        completed = boss.run_selected(client, "legion_boss", session=active)
+        self.assertTrue(completed.completed)
+        client.do_legion_boss.assert_called_once_with(force=True)
+
     @bounded
     def test_real_entry_points_cancel_previous_flow_and_keep_old_commands(self):
         from train_bot.workflows import train, daily

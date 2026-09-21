@@ -43,6 +43,33 @@ class TrainRuntimeOwnershipTests(unittest.TestCase):
         self.assertFalse(enabled({"daily_active": True}))
         self.assertFalse(enabled({"train_channel_regroup": {"phase": "safe"}}))
 
+    def test_digioi_handoff_contains_no_daily_boss_or_dungeon_execution(self):
+        source = SOURCE.read_text()
+        start = source.index("        def _finish_digioi_train_after_dg():")
+        end = source.index("\n        def _finish_digioi_train_if_time_over", start)
+        handoff = source[start:end]
+        for forbidden in ("_maybe_auto_world_boss(", "_run_auto_team_dungeons_if_needed(",
+                          "do_daily_dungeon(", "claim_daily_quests(", "do_legion_boss("):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, handoff)
+        self.assertIn("ban giao THANG sang TRAIN", handoff)
+
+    def test_train_and_digioi_force_daily_automation_off(self):
+        source = SOURCE.read_text()
+        self.assertIn('_workflow_kind in ("train", "digioi")', source)
+        self.assertIn('pcfg.get("mode") in ("train", "digioi", "digioi_train")', source)
+        self.assertIn('pcfg = dict(pcfg, do_daily=False, auto_world_boss=False,', source)
+        self.assertIn('auto_team_dungeon=False, fight_legion_boss=False)', source)
+
+    def test_world_boss_has_no_legacy_automatic_entry_or_shared_barrier(self):
+        source = SOURCE.read_text()
+        for forbidden in ("def _maybe_auto_world_boss", "_maybe_auto_world_boss(",
+                          "wb_done", "def _wait_party_world_boss", "WB_WAIT_SEC"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+        self.assertIn("from .workflows.boss import run_selected as run_daily_boss", source)
+        self.assertIn("_boss_result = run_daily_boss(", source)
+
 
 if __name__ == "__main__":
     unittest.main()
