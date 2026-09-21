@@ -47,6 +47,25 @@ class ArchitectureTests(unittest.TestCase):
         client.do_legion_boss.assert_called_once_with(force=True)
 
     @bounded
+    def test_team_dungeon_levels_are_one_leader_owned_daily_step(self):
+        from train_bot.workflows import daily
+        st = {"lock": WorkflowLock("daily-party", max_wait=.2), "cmd_gen": 0,
+              "reform_gen": 0}
+        accounts = [("leader", "", True, True), ("member", "", False, True)]
+        clients = {name: SimpleNamespace(running=True) for name, *_ in accounts}
+        services = SimpleNamespace(
+            _pstate=lambda p: st, activate_workflow=activate_locked,
+            account_clients=clients,
+            config=SimpleNamespace(PARTY_CONFIG={0: {}}, PARTY_LEADER_ACC={0: "leader"}),
+            dat_party_dang_gom=Mock(), is_account_running=lambda u: True,
+            log=Mock(), party_accounts=lambda p: accounts, time=time)
+        daily.party_daily_tasks(0, ["team_dungeon_80", "team_dungeon_20", "legion_boss"],
+                                services=services)
+        self.assertEqual(st["daily_tasks"], ("team_dungeon", "legion_boss"))
+        self.assertEqual(st["daily_team_levels"], (20, 80))
+        self.assertEqual(st["daily_team_generation"], st["cmd_gen"])
+
+    @bounded
     def test_real_entry_points_cancel_previous_flow_and_keep_old_commands(self):
         from train_bot.workflows import train, daily
         st = {"lock": WorkflowLock("test-party", max_wait=.2), "cmd_gen": 0,

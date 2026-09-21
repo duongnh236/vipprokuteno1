@@ -1259,6 +1259,12 @@ def _load_gamedata_items() -> dict:
             _gamedata_items[iid] = {"name": v.get("name", ""), "battle": bool(v.get("battle")),
                                     "hp": int(v.get("hp", 0)), "sp": int(v.get("sp", 0)),
                                     "restrict": int(v.get("restrict", 0) or 0),
+                                    # bs = btnState (Item_C.dat truong [48]): LY DO nut "Su dung" bi
+                                    # KHOA, 0 = dung duoc (xem bag_tabs.can_use). File chi ghi truong
+                                    # nay khi > 0 -> thieu = 0 = dung duoc. TRUOC DAY loader bo sot
+                                    # truong nay -> `d.get("bs")` luon None -> can_use() luon True ->
+                                    # nut DUNG hien tren CA nguyen lieu/dung cu bi khoa.
+                                    "bs": int(v.get("bs", 0) or 0),
                                     # ft = fitType = VI TRI MAC (1 mu, 2 ao, 3 vu khi...). Can de
                                     # suy mon DANG mac o vi tri do khi THAY DO - xem _on_equip_done.
                                     "ft": int(v.get("ft", 0) or 0),
@@ -1799,6 +1805,11 @@ def _save_legion_boss_next(label: str, next_ts: float):
 # VA moi lan doi pet (handler 0x13 goi lai) nen la cho chac chan nhat.
 _skill_cache_lock = threading.Lock()
 _skill_cache_sig = {}
+# Cache RAM cho `_cache_doc`: dashboard goi bag_info/bank_info moi 2.5s, ma account offline doc lai
+# account_skills_cache.json (~600KB, tui do chiem 91.5%) roi json.load moi nhip -> lang phi. Giu
+# ban da parse theo (mtime_ns, size); moi lan ghi cache se xoa entry nay.
+_cache_doc_mem = {}          # path -> ((mtime_ns, size), data_all)
+_cache_doc_lock = threading.Lock()
 
 
 def _ghi_json_an_toan(path, data):
@@ -2081,27 +2092,49 @@ def _cache_ghi(username, khoa, du_lieu, moc_ts=True) -> bool:
             log.debug("ghi cache %s loi: %s", khoa, e)
             return False
         _skill_cache_sig[khoa + ":" + username] = sig
+        with _cache_doc_lock:
+            _cache_doc_mem.pop(path, None)
         return True
 
 
 def _cache_doc(username, khoa):
-    """(du_lieu, ts) cua MOT khoa; (None, 0) neu chua co."""
-    import json, os
+    """(du_lieu, ts) cua MOT khoa; (None, 0) neu chua co.
+
+    Doc qua CACHE RAM theo (mtime_ns, size) cua file: dashboard goi moi 2.5s nen parse lai file
+    ~600KB moi nhip la lang phi. Tra BAN SAO cua rieng khoa nay de caller khong sua nham cache.
+    """
+    import copy, json, os
     username = str(username or "").strip()
     if not username:
         return None, 0
     path = _skill_cache_path()
-    if not os.path.exists(path):
-        return None, 0
     try:
-        with open(path, encoding="utf-8") as fh:
-            allc = json.load(fh) or {}
-    except Exception:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        with _cache_doc_lock:
+            _cache_doc_mem.pop(path, None)
         return None, 0
+    with _cache_doc_lock:
+        hit = _cache_doc_mem.get(path)
+    if hit is not None and hit[0] == key:
+        allc = hit[1]
+    else:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                allc = json.load(fh) or {}
+        except Exception:
+            return None, 0
+        with _cache_doc_lock:
+            _cache_doc_mem[path] = (key, allc)
     entry = allc.get(username)
     if not isinstance(entry, dict):
         return None, 0
-    return entry.get(khoa), int(entry.get(khoa + "_ts") or 0)
+    try:
+        val = copy.deepcopy(entry.get(khoa))
+    except Exception:
+        val = entry.get(khoa)
+    return val, int(entry.get(khoa + "_ts") or 0)
 
 
 # ---- CACHE TUI DO + TIEN TRANG -----------------------------------------------------------
@@ -3466,7 +3499,7 @@ class GameClient:
         if stop is not None:
             stop.set()
 
-    def start_npc40_loop(self, point, on_loss, before_repeat=None):
+    def start_npc40_loop(self, point, on_loss, before_repeat=None, ignore_window=False):
         if getattr(self, "_npc40_started", False):
             return False
         self._npc40_started = True
@@ -3481,7 +3514,8 @@ class GameClient:
             02/09). Boc o day de MOI duong that bai deu bao party mot lan."""
             ok = False
             try:
-                ok = npc40.run_loop(self, tuple(point), self._npc40_stop, on_loss, before_repeat)
+                ok = npc40.run_loop(self, tuple(point), self._npc40_stop, on_loss, before_repeat,
+                                    ignore_window=bool(ignore_window))
             except Exception as exc:
                 log.exception("[%s] 40NPC: vong lap loi: %s", self._label, exc)
             if not ok and self.running and not self._npc40_stop.is_set():

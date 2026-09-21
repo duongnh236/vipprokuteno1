@@ -209,7 +209,7 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue('st.get("ui_train_phase") != "farming"' in source)
         self.assertIn('if st.get("cmd_gen") != gen:', source)
         self.assertTrue('st["daily_participants"] = set(pending)' in (ROOT / "train_bot/workflows/daily.py").read_text())
-        self.assertIn('if not str(task).startswith("team_dungeon"):\n                        continue', source)
+        self.assertIn('if task != "team_dungeon":\n                        continue', source)
         self.assertIn('Daily: da xong, dung yen', source)
 
     def test_full_train_command_gathers_five_then_routes_only_leader(self):
@@ -522,6 +522,12 @@ class SafetyTests(unittest.TestCase):
         self.assertIn('session.fsync(output)', source)
         self.assertIn('done!=total', source)
 
+    def test_installer_delegates_unreadable_v2_certificate_to_android(self):
+        source = (ROOT.parents[1] / "main/java/com/fen/tsbot/UpdateManager.java").read_text()
+        self.assertNotIn('APK Release chưa được ký', source)
+        self.assertIn('updateSignatures.length>0&&installedSignatures.length>0', source)
+        self.assertIn('PackageInstaller installer=', source)
+
     def test_leader_saved(self):
         save = Mock()
         ns = {"_save_account_setting": save}
@@ -565,7 +571,8 @@ class SafetyTests(unittest.TestCase):
 
     def test_independent_daily_and_walk_combat(self):
         source = (ROOT / "train_bot/run_party_digioi.py").read_text()
-        self.assertIn('if not str(task).startswith("team_dungeon"):', source)
+        self.assertIn('if task != "team_dungeon":', source)
+        self.assertIn('st.get("daily_team_generation") != cmd_gen_handled', source)
         self.assertIn('route_flee = expected <= 1 and kind != "train"', source)
         self.assertIn('c.navigate_to(tx, ty, flee=False,', source)
 

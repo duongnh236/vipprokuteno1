@@ -255,8 +255,14 @@ def _open_event_battle(client, previous, stop_event, sleep_fn, poll_interval, ma
 
 
 def run_loop(client, point, stop_event, on_loss, before_repeat=None, sleep_fn=time.sleep,
-             poll_interval=0.4, max_advances=30):
-    """Run the leader-only 40 NPC loop. Returns only when stopped, lost, or timed out."""
+             poll_interval=0.4, max_advances=30, ignore_window=False):
+    """Run the leader-only 40 NPC loop. Returns only when stopped, lost, or timed out.
+
+    `ignore_window=True`: nguoi dung bam nut 40 NPC muon vao danh NGAY, khong cho dung khung
+    gio T2/T4/T6 20:00-22:00. Khi do bo qua ca viec ket thuc vi `past_window`. Neu server chua
+    mo event thi viec mo NPC se that bai -> cac nhanh thu lai/`_ket_thuc` ben duoi van chay,
+    nen khong co chuyen treo vo han.
+    """
     # DI TOI NPC: thu lai vai lan (dinh quai chan duong, lenh move roi...) truoc khi bo.
     for _lan in range(1, MAX_THU_LAI + 1):
         if client.navigate_to(int(point[0]), int(point[1]), flee=False):
@@ -357,7 +363,8 @@ def run_loop(client, point, stop_event, on_loss, before_repeat=None, sleep_fn=ti
         thu_lai = 0     # co prompt = van thong -> xoa bo dem truc trac
 
         consec_loss = (consec_loss + 1) if client._npc40_last_defeated else 0
-        past_window = not in_event_window()   # sau MOI tran: check qua 22h chua
+        # Nguoi dung ep vao danh (nut 40 NPC) -> KHONG ket thuc chi vi ngoai khung gio.
+        past_window = (not ignore_window) and not in_event_window()   # sau MOI tran: check qua 22h chua
 
         # THUA 2 TRAN LIEN TIEP -> THOAT LUON (user chot 31/08: "thua 2 lan cu thoat di"). Truoc day
         # dung yen trong map cho toi 22h -> nhin tu ngoai khong phan biet duoc voi treo (user:

@@ -40,7 +40,13 @@ def party_daily_tasks(pidx, tasks, *, services):
     allowed = ("legion_boss", "world_boss", "solo_dungeon", "team_dungeon",
                "team_dungeon_20", "team_dungeon_50", "team_dungeon_80", "team_dungeon_110")
     raw = tuple(x for x in tasks if x in allowed)
-    chosen = tuple([x for x in raw if x == "team_dungeon" or x.startswith("team_dungeon_")] +
+    team_levels = tuple(sorted({int(x.rsplit("_", 1)[1]) for x in raw
+                                if x.startswith("team_dungeon_")
+                                and x.rsplit("_", 1)[1].isdigit()}))
+    has_team = "team_dungeon" in raw or bool(team_levels)
+    # PB doi la MOT workflow chung do leader so huu. Khong phat 20/50/80 thanh ba task
+    # rieng: worker cu co the vuot qua barrier va chay boss trong luc leader con gom phong.
+    chosen = tuple((["team_dungeon"] if has_team else []) +
                    [x for x in ("legion_boss", "solo_dungeon", "world_boss") if x in raw])
     if not chosen:
         raise ValueError("chua chon daily quest")
@@ -73,6 +79,7 @@ def party_daily_tasks(pidx, tasks, *, services):
         st["daily_cancel"] = False
         st["daily_hold_after_stop"] = False
         st["daily_tasks"] = chosen
+        st["daily_team_levels"] = team_levels
         st["daily_task"] = None
         st["daily_phase"] = "queued"
         st["daily_user"] = None
@@ -88,6 +95,8 @@ def party_daily_tasks(pidx, tasks, *, services):
         st["daily_team_rally_ready"] = set()
         st["daily_team_rally_complete"] = False
         st["daily_team_rally_error"] = None
+        st["daily_team_generation"] = st["cmd_gen"]
+        st["daily_team_result"] = None
         # Moi lan bam Chay Daily la mot luot moi. Cache "done" cua PB doi tu luot truoc
         # neu khong xoa se lam member thoat cho ngay va leader khong tao phong.
         st["team_dungeon_state"] = {}

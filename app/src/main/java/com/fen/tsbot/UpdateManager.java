@@ -101,10 +101,13 @@ final class UpdateManager {
                 if(!activity.getPackageName().equals(archive.packageName))throw new Exception("APK Release sai package: "+archive.packageName);
                 if(archiveCode!=release.versionCode)throw new Exception("Release "+release.versionName+" nhưng APK bên trong là versionCode "+archiveCode+". Hãy đính kèm đúng APK v"+release.versionCode);
                 Signature[] updateSignatures=signaturesOf(archive);
-                if(updateSignatures.length==0)throw new Exception("APK Release chưa được ký. Không được upload file app-release-unsigned.apk");
                 PackageInfo installed=activity.getPackageManager().getPackageInfo(activity.getPackageName(),signatureFlags);
                 Signature[] installedSignatures=signaturesOf(installed);
-                if(installedSignatures.length==0||!sameSignatures(installedSignatures,updateSignatures))
+                // Mot so ROM (Oppo/ColorOS) tra signingInfo=null cho APK archive chi ky v2,
+                // du APK hop le. Neu doc duoc ca hai cert thi so sanh som; neu khong, giao cho
+                // PackageInstaller xac minh chu ky. Android van tu choi APK unsigned/sai key.
+                if(updateSignatures.length>0&&installedSignatures.length>0
+                        &&!sameSignatures(installedSignatures,updateSignatures))
                     throw new Exception("APK Release dùng chữ ký khác bản đang cài; Android không cho phép cập nhật đè");
                 PackageInstaller installer=activity.getPackageManager().getPackageInstaller();
                 PackageInstaller.SessionParams params=new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);

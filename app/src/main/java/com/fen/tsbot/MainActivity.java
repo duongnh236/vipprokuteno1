@@ -32,7 +32,7 @@ public class MainActivity extends Activity {
     private final List<String> trainGroups = new ArrayList<>();
     private Spinner serverSpinner, trainGroupSpinner, mapSpinner, modeSpinner, digioiLevelSpinner, farmPointSpinner; private EditText farmX, farmY; private TextView status, selectionInfo,dailyStatus,updateStatus; private Button dailyStop,updateButton,startFarmButton;
     private SharedPreferences trainPrefs; private boolean restoringTrainSelection=false;
-    private Button switchLeaderButton,loginAllButton,logoutAllButton;
+    private Button switchLeaderButton,loginAllButton,logoutAllButton,npc40Button;
     private boolean loginAllPending=false,loginAllAcknowledged=false,logoutAllPending=false;
     private View configView; private TeamMapView teamMapView; private AccountManagerView accountManagerView; private FrameLayout pageHost;
     private final Button[] accountNavButtons=new Button[5]; private Button controlNavButton; private int currentPage=0,selectedAccount=0; private JSONArray bottomAccounts=new JSONArray();
@@ -83,6 +83,7 @@ public class MainActivity extends Activity {
         note.setPadding(dp(12),dp(10),dp(12),dp(10)); note.setBackgroundColor(CARD); root.addView(note, matchWrap());
         root.addView(section("CẤU HÌNH PARTY"));
         switchLeaderButton=button("👑 ĐỔI LEADER ONLINE",Color.rgb(145,100,30),Color.WHITE);switchLeaderButton.setOnClickListener(v->showLeaderSwitchDialog());root.addView(switchLeaderButton,matchWrap());
+        npc40Button=button("🏹  40 NPC",Color.rgb(150,92,42),Color.WHITE);npc40Button.setOnClickListener(v->showNpc40Dialog());root.addView(npc40Button,matchWrap());
         serverSpinner = spinner(); modeSpinner = spinner(); digioiLevelSpinner=spinner(); trainGroupSpinner=spinner(); mapSpinner = spinner(); farmPointSpinner=spinner();
         modeSpinner.setAdapter(adapter(Arrays.asList("Train theo map", "Đứng yên", "Dị giới + farm")));
         digioiLevelSpinner.setAdapter(adapter(Arrays.asList("Cấp 10","Cấp 25","Cấp 40","Cấp 55","Cấp 70","Cấp 85","Cấp 100","Cấp 110","Cấp 120","Cấp 130","Cấp 140","Cấp 150","Cấp 160","Cấp 170","Cấp 180")));
@@ -133,6 +134,18 @@ public class MainActivity extends Activity {
     }
 private void showLeaderSwitchDialog(){List<String> names=new ArrayList<>(),ids=new ArrayList<>();for(int i=0;i<bottomAccounts.length();i++){JSONObject a=bottomAccounts.optJSONObject(i);if(a!=null&&a.optBoolean("online")){ids.add(a.optString("user"));names.add(a.optString("name",a.optString("user"))+(a.optBoolean("leader")?" • LEADER HIỆN TẠI":""));}}if(ids.isEmpty()){Toast.makeText(this,"Cần ít nhất 1 account online",Toast.LENGTH_LONG).show();return;}new AlertDialog.Builder(this).setTitle("Chọn leader mới").setItems(names.toArray(new String[0]),(d,index)->new AlertDialog.Builder(this).setTitle("Đổi leader sang "+names.get(index)).setMessage("Nếu chưa có party: chọn trực tiếp, không cần ACC1 online. Nếu đã có party: chờ hết trận → leader cũ kéo team về SAFE → giải tán party → leader mới mời lại team. Không logout account. Nếu đang farm sẽ tiếp tục bãi đã chọn sau khi đổi xong.").setNegativeButton("HỦY",null).setPositiveButton("ĐỔI LEADER",(confirm,w)->switchOnlineLeader(ids.get(index))).show()).setNegativeButton("ĐÓNG",null).show();}
     private void switchOnlineLeader(String user){switchLeaderButton.setEnabled(false);switchLeaderButton.setText("⌛ ĐANG ĐỔI LEADER…");startFarmButton.setEnabled(false);status.setText("Đang chờ hết trận, về SAFE và lập lại party với leader mới…");io.execute(()->{try{JSONObject r=new JSONObject(Python.getInstance().getModule("agent_bridge").callAttr("switch_leader_json",user).toString());runOnUiThread(()->{if(isFinishing()||isDestroyed())return;switchLeaderButton.setEnabled(true);switchLeaderButton.setText("👑 ĐỔI LEADER ONLINE");startFarmButton.setEnabled(true);status.setText(r.optString("message"));Toast.makeText(this,r.optString("message"),Toast.LENGTH_LONG).show();refreshAccountsDashboard();});}catch(Exception e){runOnUiThread(()->{if(isFinishing()||isDestroyed())return;switchLeaderButton.setEnabled(true);switchLeaderButton.setText("👑 ĐỔI LEADER ONLINE");startFarmButton.setEnabled(true);status.setText("Lỗi đổi leader: "+e.getMessage());});}});}
+    private void showNpc40Dialog(){
+        new AlertDialog.Builder(this).setTitle("🏹  40 NPC")
+            .setMessage("Event 40 NPC (map 10991) mở Thứ 2 / Thứ 4 / Thứ 6, 20:00–22:00.\n\nBot sẽ cho cả team vào mở NPC và đánh ngay, KHÔNG chờ đúng khung giờ. Nếu server chưa mở event, bot thử vài lần rồi tự dừng (không treo).\n\nCần LOGIN ALL team trước. Nếu đang farm, team sẽ dừng farm và chuyển ngay sang event.")
+            .setNegativeButton("HỦY",null)
+            .setPositiveButton("VÀO 40 NPC",(d,w)->startNpc40())
+            .show();
+    }
+    private void startNpc40(){
+        if(npc40Button==null||!npc40Button.isEnabled())return;
+        npc40Button.setEnabled(false);npc40Button.setText("⌛ ĐANG CHUYỂN 40 NPC…");status.setText("Đang chờ hết trận rồi chuyển cả team sang event 40 NPC…");
+        io.execute(()->{try{JSONObject r=new JSONObject(Python.getInstance().getModule("agent_bridge").callAttr("start_event_json","npc_40").toString());runOnUiThread(()->{if(isFinishing()||isDestroyed())return;npc40Button.setEnabled(true);npc40Button.setText("🏹  40 NPC");status.setText(r.optString("message"));Toast.makeText(this,r.optString("message"),Toast.LENGTH_LONG).show();});}catch(Exception e){runOnUiThread(()->{if(isFinishing()||isDestroyed())return;npc40Button.setEnabled(true);npc40Button.setText("🏹  40 NPC");status.setText("Lỗi 40 NPC: "+e.getMessage());Toast.makeText(this,"Lỗi 40 NPC: "+e.getMessage(),Toast.LENGTH_LONG).show();});}});
+    }
     private void showServerPackets(){io.execute(()->{try{String raw=Python.getInstance().getModule("agent_bridge").callAttr("server_packets_json").toString();runOnUiThread(()->{if(isFinishing()||isDestroyed())return;TextView content=text(raw,11,Color.WHITE);content.setTypeface(Typeface.MONOSPACE);content.setTextIsSelectable(true);content.setPadding(dp(12),dp(12),dp(12),dp(12));ScrollView scroll=new ScrollView(this);scroll.setBackgroundColor(BG);scroll.addView(content);new AlertDialog.Builder(this).setTitle("100 packet server gần nhất • JSON").setView(scroll).setPositiveButton("ĐÓNG",null).show();});}catch(Exception e){runOnUiThread(()->Toast.makeText(this,"Không đọc được packet JSON: "+e.getMessage(),Toast.LENGTH_LONG).show());}});}
 
     private void downloadUpdate(UpdateManager.Release release){

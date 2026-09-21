@@ -1105,6 +1105,9 @@ def _party_40npc_ngoai_gio(pidx, pcfg):
     """
     if (pcfg or {}).get("mode") != "event":
         return False
+    # Nguoi dung bam nut 40 NPC: ep vao danh bat ke gio -> KHONG coi la "ngoai gio" de bo dieu phoi.
+    if (pcfg or {}).get("npc40_force"):
+        return False
     has_leader = config.PARTY_LEADER_ACC.get(pidx) is not None
     ev = _ev_cua_party(pcfg)
     if not _is_npc_repeat_party_event("event", has_leader, ev):
@@ -5819,7 +5822,8 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
             # Ngoai gio thi CHANG CON GI DE LAM, co leader hay khong cung the. Doc thang `ev` de
             # biet day co phai event 40NPC.
             _kind_raw = ((ev or {}).get("party_battle") or {}).get("kind")
-            if mode == "event" and _kind_raw == "npc_repeat" and not c.in_40npc_window():
+            if mode == "event" and _kind_raw == "npc_repeat" and not c.in_40npc_window() \
+                    and not pcfg.get("npc40_force"):
                 log.info("[%s] (%s) 40NPC NGOAI GIO event -> huy party + di doi thuong + thoat game",
                          label, role)
                 try: c.leave_party()
@@ -6422,7 +6426,8 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                         st["event_battle_active"] = True
                     c.flee_mode = False
                     _set_party_quest_mode(pidx, True, label)
-                    if c.start_npc40_loop(point, _on_npc40_loss, _before_npc40_repeat):
+                    if c.start_npc40_loop(point, _on_npc40_loss, _before_npc40_repeat,
+                                          ignore_window=bool(pcfg.get("npc40_force"))):
                         log.info("[%s] (LEADER) 40NPC: du party -> den %s va bat dau lap battle", label, point)
                 elif train_on_map:
                     # CO acc bi DUMP khoi dungeon (reform_gen tang so voi truoc dungeon) -> KHONG keo ra
@@ -7478,9 +7483,10 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                                  "team_dungeon_50": "Ngày Tàn Hoạn Quan • Cấp 50",
                                  "team_dungeon_80": "Đại Chiến Lữ Bố • Cấp 80",
                                  "team_dungeon_110": "Hỏa Thiêu Bộc Dương • Cấp 110"}
-                team_levels = {int(x.rsplit("_", 1)[1]) for x in tasks
+                team_levels = set(st.get("daily_team_levels") or ())
+                team_levels.update(int(x.rsplit("_", 1)[1]) for x in tasks
                                if str(x).startswith("team_dungeon_")
-                               and str(x).rsplit("_", 1)[1].isdigit()}
+                               and str(x).rsplit("_", 1)[1].isdigit())
                 team_done = False
                 log.info("[%s] (%s) DAILY QUEST tay: %s", label, role, tasks)
                 c._daily_hold = False
@@ -7534,13 +7540,15 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                             _boss_result = run_daily_boss(
                                 c, task,
                                 session=st.get("android_workflow_session"),
-                                stopped=lambda: (_stopped() or st.get("daily_cancel", False)))
+                                stopped=lambda: (_stopped() or st.get("daily_cancel", False)
+                                                 or st.get("cmd_gen", 0) != cmd_gen_handled))
                             if not _boss_result.completed:
                                 raise RuntimeError(_boss_result.message or _boss_result.status)
                         elif task == "solo_dungeon":
                             set_account_activity(username, "Daily: pho ban don", phase="daily")
                             c.do_daily_dungeon(cho_phep=lambda: (
-                                "user da bam Dung Daily" if st.get("daily_cancel", False)
+                                "Daily da dung/doi phien" if (st.get("daily_cancel", False)
+                                    or st.get("cmd_gen", 0) != cmd_gen_handled)
                                 else None))
                         elif (task == "team_dungeon" or str(task).startswith("team_dungeon_")) and not team_done:
                             team_done = True
@@ -7553,7 +7561,11 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                                 _daily_cfg["team_dungeons"] = {
                                     lv: lv in team_levels for lv in (20, 50, 80, 110)
                                 }
-                            _daily_stopped = lambda: (_stopped() or st.get("daily_cancel", False))
+                            # Generation la quyen so huu workflow. Lenh Daily moi phai huy ngay
+                            # worker cu, neu khong member cu chay boss trong khi leader moi dang rally.
+                            _daily_stopped = lambda: (_stopped() or st.get("daily_cancel", False)
+                                or st.get("cmd_gen", 0) != cmd_gen_handled
+                                or st.get("daily_team_generation") != cmd_gen_handled)
                             c._td_stop_requested = lambda: bool(st.get("daily_cancel", False))
                             try:
                                 if not _manual_team_dungeon_rally(c, st, username, pidx, _daily_stopped):
@@ -7561,6 +7573,9 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                                 _run_auto_team_dungeons_if_needed(
                                     c, st, username, label, pidx, is_leader,
                                     _daily_stopped, _daily_cfg)
+                                with st["lock"]:
+                                    if is_leader and st.get("daily_team_generation") == cmd_gen_handled:
+                                        st["daily_team_result"] = "completed"
                             finally:
                                 c._td_stop_requested = None
                     except Exception as e:
@@ -7576,7 +7591,7 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                     with st["lock"]:
                         st.setdefault("daily_step_done", {}).setdefault(_step_key, set()).add(username)
                         st.setdefault("daily_resume_indices", {})[username] = task_index + 1
-                    if not str(task).startswith("team_dungeon"):
+                    if task != "team_dungeon":
                         continue  # Daily riêng không chờ team.
                     _barrier_t0 = time.time()
                     while c.running and not _stopped() and not st.get("daily_cancel", False):
@@ -9988,7 +10003,9 @@ def setup_party_runtime(pidx, mode, server_ip, server_id, accounts,
                         # (cat_do_items.json), khong phai config theo party.
                         auto_open_boxes=False, box_modes=None, auto_cat_do=False,
                         # TU MO RONG TIEN TRANG. THEM O CUOI CUNG (Kotlin goi THEO VI TRI).
-                        auto_bank_expand=False, bank_expand_gold=0):
+                        auto_bank_expand=False, bank_expand_gold=0,
+                        # 40 NPC: nguoi dung bam nut ep vao danh bat ke khung gio event.
+                        npc40_force=False):
     """ANDROID: Kotlin goi de POPULATE config cho 1 party luc runtime (thay vi doc accounts.json
     nhu PC). accounts = 1 CHUOI STRING duy nhat dang "u1\\x01p1\\x01battle_json\\x01heal_json\\x01u2..." (KHONG phai
     list/List<String> - da xac nhan qua logcat that: Chaquopy KHONG convert dung List<String>
@@ -10029,6 +10046,7 @@ def setup_party_runtime(pidx, mode, server_ip, server_id, accounts,
         "bag_expand_gold": int(bag_expand_gold or 0),
         "auto_bank_expand": bool(auto_bank_expand),
         "bank_expand_gold": int(bank_expand_gold or 0),
+        "npc40_force": bool(npc40_force),
         "use_phuc_than": bool(use_phuc_than), "use_digioi_ho_phu": bool(use_digioi_ho_phu),
         "fight_legion_boss": bool(fight_legion_boss),
         "do_van_tieu": bool(do_van_tieu),
@@ -13473,6 +13491,7 @@ def _bag_info_slots(slots, c):
     from . import bag_tabs as _bt
     from .client import _load_gamedata_items, GameClient
     _BANK_RESTRICT_CAM = GameClient.BANK_RESTRICT_CAM
+    _RESTRICT_NOT_COMBINE = GameClient.RESTRICT_NOT_COMBINE_MATERIAL
     gd = _load_gamedata_items()
     o = []
     for slot, val in sorted((slots or {}).items()):
@@ -13492,9 +13511,14 @@ def _bag_info_slots(slots, c):
             "kd": int(d.get("kd", 0) or 0),
             "tab": [t for t, _ten in _bt.TAB_NAMES
                     if _bt.matches_tab(t, d.get("ft"), d.get("kd"))],
-            "use": bool(_bt.can_use(d.get("bs"))),
+            # Trang bi KHONG hien nut DUNG (no co nut DEO rieng). Nhieu mon trang bi thieu `bs`
+            # trong gamedata (coi la 0 = dung duoc) nen phai loai theo fitType, khong thi nut DUNG
+            # hien tren ca vu khi/giap.
+            "use": bool(_bt.can_use(d.get("bs")) and not _bt.can_equip(d.get("ft"), d.get("kd"))),
             "equip": bool(_bt.can_equip(d.get("ft"), d.get("kd"))),
             "dis": bool(_bt.can_dismantle(d.get("fc"))),
+            # Mon co `restrict` bit 4 = KHONG phai nguyen lieu hop -> UI an khoi spinner HOP.
+            "combine": not (int(d.get("restrict", 0) or 0) & _RESTRICT_NOT_COMBINE),
             "fashion": bool(c.is_fashion_item(tid)) if c is not None else False,
             # Mon game CAM gui ngan hang -> khong cho them vao list cat (them cung vo ich).
             # Day la co DUY NHAT con dung o ban cache: nut "Tu cat vao Tien trang" ghi thang

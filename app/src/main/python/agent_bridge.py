@@ -615,7 +615,8 @@ def account_action_json(username, action, payload="{}"):
         if client is None or not getattr(client, "running", False):
             raise RuntimeError("Account chưa online")
         if action in {"buy_ho_phu", "buy_bao_hop", "gacha_pet", "gacha_card",
-                      "furnace_buy", "combine", "discard", "use_item"} and client.in_combat(idle_secs=1.0):
+                      "furnace_buy", "combine", "discard", "use_item", "equip",
+                      "decompose"} and client.in_combat(idle_secs=1.0):
             raise RuntimeError("Đang trong trận, hãy chờ kết thúc trận rồi thử lại")
         if action == "buy_ho_phu":
             client.buy_di_gioi_ho_phu(); message = "Đã gửi mua Dị Giới Hộ Phù"
@@ -634,6 +635,14 @@ def account_action_json(username, action, payload="{}"):
             slot = int(data.get("slot", 0)); qty = max(1, int(data.get("qty", 1)))
             if not client.discard_item(slot, qty): raise RuntimeError("Vật phẩm đang khóa hoặc server không nhận")
             message = "Đã gửi vứt vật phẩm"
+        elif action == "equip":
+            slot = int(data.get("slot", 0))
+            if not client.equip_item(slot): raise RuntimeError("Server không nhận lệnh trang bị")
+            message = "Đã gửi trang bị vật phẩm"
+        elif action == "decompose":
+            slot = int(data.get("slot", 0))
+            if not client.decompose_slot(slot): raise RuntimeError("Không phân giải được (server không xác nhận)")
+            message = "Đã gửi phân giải vật phẩm"
         elif action == "use_item":
             slot = int(data.get("slot", 0)); qty = max(1, min(255, int(data.get("qty", 1))))
             rec = (client.bag_slots or {}).get(slot)
@@ -767,6 +776,8 @@ def start_json(payload):
             auto_world_boss=False, auto_team_dungeon=False, do_van_tieu=False,
             fight_legion_boss=False,
             di_gioi_level=max(1, min(15, int(data.get("di_gioi_level", 2) or 2))),
+            event_key=str(data.get("event_key", "") or ""),
+            npc40_force=bool(data.get("npc40_force", False)),
             auto_sell_noi_dat=False, auto_bag_clean=False, auto_discard_junk=False,
             auto_donate_materials=False, death_return_town=True, pet_death_return_town=True)
         from train_bot import config
@@ -980,6 +991,62 @@ def start_farm_mode_json(mode, map_id, x, y, di_gioi_level=2):
                 c._ui_mode_restart = True
         dg_levels = [10, 25, 40, 55, 70, 85, 100, 110, 120, 130, 140, 150, 160, 170, 180]
         return json.dumps({"ok": True, "message": "Đã chạy Dị giới cấp %d → farm: chờ hết trận, vào Dị giới; cả team hết giờ sẽ ra bãi farm đã chọn" % dg_levels[di_gioi_level - 1]}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "message": str(exc)}, ensure_ascii=False)
+
+
+def start_event_json(event_key="npc_40"):
+    """Nut 40 NPC tren tab Dieu Khien: chuyen CA team sang mode event (mac dinh 40NPC).
+
+    Khac `start_farm_mode_json` o cho day la event danh theo party (leader mo NPC, ca doi hoi
+    phuc giua tran). Dat `npc40_force=True` de bo qua khung gio T2/T4/T6 20:00-22:00: nguoi
+    dung bam la team vao mo NPC danh ngay. Neu server chua mo event thi viec mo tran that bai,
+    loop tu thu lai vai lan roi ket thuc (khong treo).
+
+    Dung chung co che voi Di gioi -> train: `ui_mode_restart_users` + `_ui_mode_restart` lam
+    thread hien tai tra ve, supervisor relogin tren CUNG socket va doc lai mode moi.
+    """
+    try:
+        from train_bot import config
+        runner = _get_runner()
+        st = runner._pstate(0)
+        live = _live_party(runner)
+        leader = config.PARTY_LEADER_ACC.get(0)
+        if not live or leader not in dict(live):
+            raise RuntimeError("Hãy LOGIN ALL team trước rồi bấm 40 NPC")
+        event_key = str(event_key or "npc_40")
+        ev = config.event_hom_nay(event_key)
+        if not ev:
+            raise ValueError("Không tìm thấy event '%s' trong events.json" % event_key)
+        if any(c.in_team_dungeon() for _, c in live):
+            raise RuntimeError("Hãy hoàn tất phụ bản hiện tại trước")
+        with st["lock"]:
+            if st.get("daily_active") or st.get("leader_switch_pending") or st.get("ui_mode_restart_users"):
+                raise RuntimeError("Luồng team khác đang chạy; hãy chờ hoàn tất")
+            from train_bot.workflows.lifecycle import activate_locked
+            activate_locked(st, "event")
+            config.PARTY_CONFIG[0].update(mode="event", event_key=event_key, npc40_force=True,
+                                         train_pick="", do_daily=False,
+                                         auto_world_boss=False, auto_team_dungeon=False,
+                                         fight_legion_boss=False, do_van_tieu=False)
+            st["dt_phase"] = "event"
+            st["daily_hold_after_stop"] = False
+            st["ui_train_phase"] = "idle"
+            st["ui_train_dispatch_gen"] = None
+            st["dt_train_prepared"] = False
+            st["ui_train_target"] = None
+            st["cmd"] = None
+            st["cmd_gen"] += 1
+            st["ui_mode_restart_users"] = {u for u, _ in live}
+            # Phien event MOI -> xoa co "da thua/da xong" cua lan truoc, danh lai tu dau.
+            st["go_claim"].clear()
+            st["event_battle_done"].clear()
+            for _, c in live:
+                c._daily_hold = False
+                c._ui_auto_battle = True
+                c._ui_mode_restart = True
+        label = ev.get("label") or event_key
+        return json.dumps({"ok": True, "message": "Đang chuyển cả team sang event %s (bỏ qua khung giờ)…" % label}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"ok": False, "message": str(exc)}, ensure_ascii=False)
 
