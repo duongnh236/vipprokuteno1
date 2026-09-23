@@ -10,9 +10,15 @@ from .config import XOR_KEY
 MAGIC = b"\xc0\x91"
 
 
+# Bang tra 256 byte: XOR_KEY la hang so -> bytes.translate chay o tang C, nhanh hon HAN vong lap
+# Python tung byte. Ham nay duoc goi MOI packet ca luc nhan (recv) lan luc gui (encode) -> nam
+# thang tren duong nong cua tung turn danh.
+_XOR_TABLE = bytes(i ^ XOR_KEY for i in range(256))
+
+
 def xor(data: bytes) -> bytes:
-    """XOR 2 chieu (encode = decode)."""
-    return bytes(b ^ XOR_KEY for b in data)
+    """XOR 2 chieu (encode = decode). Dung translate (C-level) thay vong lap Python."""
+    return data.translate(_XOR_TABLE)
 
 
 def build_packet(opcode: int, payload: bytes) -> bytes:

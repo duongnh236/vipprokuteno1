@@ -1,5 +1,6 @@
 """TCP client TS Online: ket noi, auth, heartbeat, recv loop, dispatch + combat."""
 import functools
+import heapq
 import socket
 import struct
 import threading
@@ -34,6 +35,14 @@ RECV_DEAD_SECS = 120.0      # khong nhan GOI nao suot >120s -> coi server half-o
 def _open_game_socket(host, port):
     sock = socket.create_connection((host, port), timeout=15)
     sock.settimeout(RECV_SOCK_TIMEOUT)
+    # TCP_NODELAY: TAT Nagle. Lenh chien dau 0x32 chi ~15 byte; khong tat Nagle thi Nagle +
+    # delayed-ACK co the giu goi lai ~40ms MOI turn -> bot tra lenh tre so voi cua so server cho.
+    # Day la chien dau that-thoi-gian-thuc nen KHONG duoc gop goi.
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        pass
     return sock
 
 
@@ -276,6 +285,90 @@ def _set_thread_prio(level: int):
             os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), {1: -2, 0: 0, -1: 5}[level])
     except Exception:
         pass
+
+
+class _DeferredWorker:
+    """Mot thread nen chay callback theo hen gio - thay cho ``threading.Timer``.
+
+    ``threading.Timer`` sinh MOT thread moi cho moi lan hen. Duong ra quyet dinh hen no toi
+    ~10 lan/turn (party 5 nguoi = toi 10 goi 0x35) + 1 lan reset/turn -> hang tram nghin lan
+    sinh/huy thread moi phien, moi lan deu ton chi phi tao thread + GIL. Worker nay giu DUNG
+    MOT thread cho ca phien, hen gio bang heap + Condition.
+
+    Thay the chinh xac ngu nghia cu:
+      * ``schedule(delay, cb)`` -> tra handle; nhieu hen doc lap duoc phep (reset turn).
+      * ``cancel(handle)`` -> huy mot hen (buoc ra quyet dinh bi thay khi co 0x35 moi).
+    """
+
+    def __init__(self, name="turn-worker"):
+        self._cv = threading.Condition()
+        self._heap = []          # [(deadline_monotonic, handle, callback)]
+        self._seq = 0
+        self._cancelled = set()
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
+
+    def schedule(self, delay, callback):
+        with self._cv:
+            if self._closed:
+                return None
+            self._seq += 1
+            handle = self._seq
+            heapq.heappush(self._heap, (time.monotonic() + max(0.0, delay), handle, callback))
+            self._cv.notify()
+            return handle
+
+    def cancel(self, handle):
+        if handle is None:
+            return
+        with self._cv:
+            self._cancelled.add(handle)
+            self._cv.notify()
+
+    def close(self):
+        with self._cv:
+            self._closed = True
+            self._heap.clear()
+            self._cancelled.clear()
+            self._cv.notify()
+
+    def _pop_ready(self):
+        """Tra callback den han (bo qua cac hen da huy), hoac None neu worker da dong."""
+        while True:
+            if self._closed:
+                return None
+            while self._heap and self._heap[0][1] in self._cancelled:
+                _dl, handle, _cb = heapq.heappop(self._heap)
+                self._cancelled.discard(handle)
+            if not self._heap:
+                self._cv.wait()
+                continue
+            deadline, handle, callback = self._heap[0]
+            now = time.monotonic()
+            if deadline > now:
+                self._cv.wait(deadline - now)
+                continue
+            heapq.heappop(self._heap)
+            self._cancelled.discard(handle)
+            return callback
+
+    def _run(self):
+        while True:
+            with self._cv:
+                callback = self._pop_ready()
+                if self._closed:
+                    return
+            if callback is None:
+                continue
+            try:
+                callback()
+            except Exception:
+                log.exception("turn worker callback loi")
+            finally:
+                # Thread nay SONG DAI (khac Timer: thread moi luon bat dau o muc thuong) nen phai
+                # tra priority ve thuong sau moi lan chay. `_make_decisions` tu nang len 1 khi PB.
+                _set_thread_prio(0)
 
 
 # NGOC PHUC THAN - DU 4 LOAI, xep TOT -> KEM theo he so kinh nghiem (items_desc.json).
@@ -2322,7 +2415,10 @@ class GameClient:
         # combat turn handling
         self.available = {}          # unit -> list (atype, target)
         self._acted_turn = False
-        self._decision_timer = None
+        # Worker hen gio cho vong ra quyet dinh (thay threading.Timer): 1 thread/phien thay vi
+        # 1 thread moi lan hen. `_decision_handle` = hen dang cho cua buoc ra quyet dinh (de huy).
+        self._turn_worker = _DeferredWorker(name="turn-%s" % (user_id or "acc"))
+        self._decision_handle = None
         # Hai cong tac UI doc lap: AUTO BATTLE quyet dinh co gui lenh danh hay khong;
         # AUTO TRUY KICH chi quyet dinh co chay hinh so 8 hay khong.
         self.auto_combat = False
@@ -3287,14 +3383,16 @@ class GameClient:
             self.server_closed = True
         self._deliberate_close = True   # ta tu dong -> OSError trong recv KHONG phai server rot
         self.running = False
-        # Timer combat giu bound-method -> giu ca GameClient trong RAM cho toi khi timer chay.
-        # Huy ngay khi close, dong thoi bo cac queue callback/debug khong con dung nua.
+        # Worker hen gio giu bound-method -> giu ca GameClient trong RAM. Dong worker + huy hen
+        # ngay khi close, dong thoi bo cac queue callback/debug khong con dung nua.
         try:
-            if self._decision_timer is not None:
-                self._decision_timer.cancel()
+            self._cancel_decision()
+            worker = getattr(self, "_turn_worker", None)
+            if worker is not None:
+                worker.close()
         except Exception:
             pass
-        self._decision_timer = None
+        self._decision_handle = None
         self._pending_party_invites.clear()
         self._pending_0b[:] = []
         self._bag_queue[:] = []
@@ -3846,7 +3944,7 @@ class GameClient:
             for opcode, pkt in pkts:
                 from .packet_trace import record as _record_server_packet
                 _record_server_packet(self._username or self._label, opcode, pkt)
-                self._recent_recvs.append((time.time(), opcode, pkt.hex()[:60]))
+                self._recent_recvs.append((time.time(), opcode, pkt[:30].hex()))
                 try:
                     self._dispatch(opcode, pkt)
                 except Exception as e:
@@ -4193,7 +4291,9 @@ class GameClient:
         }
 
     def _dispatch(self, opcode: int, pkt: bytes):
-        log.debug("[%s] RECV op=0x%02x len=%d %s", self._label, opcode, len(pkt), pkt.hex())
+        if log.isEnabledFor(logging.DEBUG):
+            # pkt.hex() duoc tinh EAGER neu de lam tham so -> ton cho MOI packet du debug dang tat.
+            log.debug("[%s] RECV op=0x%02x len=%d %s", self._label, opcode, len(pkt), pkt.hex())
         # Metrics theo start/end cua battle tracker, khong theo broadcast 0x34 (co noise
         # va member co the duoc bootstrap ma khong nhan start legacy).
         # Giu ma ack Boss QD de khong gui lenh vao instance khi lenh mo da bi tu choi.
@@ -6354,9 +6454,7 @@ class GameClient:
             elif event.kind == "end":
                 self._metrics_battle_end()
                 self.available = {}
-                if self._decision_timer:
-                    self._decision_timer.cancel()
-                    self._decision_timer = None
+                self._cancel_decision()
                 now = time.time()
                 self._genuine_end_seen = now
                 self._set_battle_end_grace()
@@ -6408,21 +6506,39 @@ class GameClient:
             self._battle_account_id(), tracker.generation, tracker.turn, source=source,
         )
 
+    def _cancel_decision(self):
+        """Huy hen ra quyet dinh dang cho (neu co). An toan ca khi worker chua san sang."""
+        handle = getattr(self, "_decision_handle", None)
+        worker = getattr(self, "_turn_worker", None)
+        if handle is not None and worker is not None:
+            worker.cancel(handle)
+        self._decision_handle = None
+
+    def _schedule_decision(self, delay):
+        """Hen buoc ra quyet dinh sau `delay` giay (thay threading.Timer)."""
+        worker = getattr(self, "_turn_worker", None)
+        if worker is not None:
+            self._decision_handle = worker.schedule(delay, self._make_decisions)
+
+    def _schedule_reset(self, delay):
+        """Hen `_reset_turn` sau `delay` giay. Nhieu hen doc lap (giong Timer cu)."""
+        worker = getattr(self, "_turn_worker", None)
+        if worker is not None:
+            worker.schedule(delay, self._reset_turn)
+
     def _arm_decision(self):
-        if self._decision_timer:
-            self._decision_timer.cancel()
-        # Khong chen delay nhan tao. Timer 0 van tach khoi receive thread, nen parser khong bi block;
-        # coordinator/generation ben `_send_combat` van chan trung va sai luot.
+        self._cancel_decision()
+        # Khong chen delay nhan tao. Delay 0 van tach khoi receive thread (worker rieng), nen parser
+        # khong bi block; coordinator/generation ben `_send_combat` van chan trung va sai luot.
         if self.in_team_dungeon():
             delay = 0.0
         else:
             delay = self.submit_delay
-        self._decision_timer = threading.Timer(delay, self._make_decisions)
-        self._decision_timer.start()
+        self._schedule_decision(delay)
 
     def _make_decisions(self):
-        # Thread Timer nay GUI lenh danh 0x32. Khi dang PB -> uu tien de lenh khong bi cac acc train
-        # lam tre (tre -> lech phien/mat luot -> luot cham 25s). Timer ngan han nen set moi lan.
+        # Worker hen gio nay GUI lenh danh 0x32. Khi dang PB -> uu tien de lenh khong bi cac acc train
+        # lam tre (tre -> lech phien/mat luot -> luot cham 25s). Hen ngan han nen set moi lan.
         if self.in_team_dungeon():
             _set_thread_prio(1)
         if self._acted_turn:
@@ -6446,13 +6562,12 @@ class GameClient:
             # thu lai chi thay 'khong con quai song' roi thoi (vo hai).
             self._gate_retry = getattr(self, "_gate_retry", 0) + 1
             if self._gate_retry <= 40:          # ~12s (0.3s/lan)
-                self._decision_timer = threading.Timer(0.3, self._make_decisions)
-                self._decision_timer.start()
+                self._schedule_decision(0.3)
                 return
             log.warning("[%s] cho gate transit qua lau -> bo luot nay", self._label)
             self._gate_retry = 0
             self.available = {}
-            threading.Timer(1.0, self._reset_turn).start()
+            self._schedule_reset(1.0)
             return
         self._gate_retry = 0
         # Neu stats chua load -> chi cho toi da 0.2s. Khong de mot packet stat cham lam ca luot
@@ -6465,7 +6580,7 @@ class GameClient:
             else:
                 log.warning("[%s] Stats chua load sau 0.2s -> bo qua luot", self._label)
                 self.available = {}
-                threading.Timer(1.5, self._reset_turn).start()
+                self._schedule_reset(1.5)
                 return
         self._acted_turn = True
         try:
@@ -6576,7 +6691,7 @@ class GameClient:
         finally:
             # reset cho luot sau
             self.available = {}
-            threading.Timer(1.5, self._reset_turn).start()
+            self._schedule_reset(1.5)
 
     def _reset_turn(self):
         self._acted_turn = False
