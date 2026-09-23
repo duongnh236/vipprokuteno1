@@ -66,6 +66,27 @@ dist/aTSBot-Android-v<version>-<variant>.apk        # do script copy
 - Layout: `res/layout/activity_splash.xml`; chuỗi `app_name` ở `res/values/strings.xml`.
 - Nhờ `buildConfig true`, splash luôn hiện đúng version của bản đang chạy (vì version auto-bump).
 
+## Chạy cửa sổ (multi-window / freeform)
+
+Để app mở **song song với app khác**, manifest đã bật sẵn (build nào cũng áp dụng, không cần code):
+
+- `<application ... android:resizeableActivity="true">` — cờ CHÍNH, cho activity chạy dạng cửa sổ
+  (split-screen / freeform).
+- `android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"`
+  trên **SplashActivity + MainActivity** — cửa sổ đổi kích thước thì **KHÔNG recreate** activity
+  (giữ nguyên UI/state, tránh dựng lại giao diện khi kéo cửa sổ).
+- Vẫn giữ `screenOrientation="portrait"` (UI thiết kế dọc). Nếu ROM/DeX chặn freeform vì khóa hướng
+  thì bỏ thuộc tính này để cửa sổ tự do xoay/kéo.
+
+Cách dùng trên máy:
+- **Split-screen**: mở đa nhiệm → kéo app sang một cạnh, chọn app còn lại.
+- **Freeform**: bật Developer options "Enable freeform windows" (hoặc Samsung DeX / tablet / ChromeOS).
+
+Kiểm tra manifest sau build:
+```bash
+"$ANDROID_HOME"/build-tools/*/aapt2 dump xmltree <apk> --file AndroidManifest.xml | grep -i resizeable
+```
+
 ## Cập nhật GitHub Release (cho updater)
 
 1. Build xong, xác minh chữ ký.

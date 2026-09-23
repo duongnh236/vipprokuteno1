@@ -3135,28 +3135,36 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
             c.claim_legion_gift()   # nhan qua quan doan hang ngay
             c.claim_friend_gifts()  # tang qua tat ca ban + nhan qua ban tang (hang ngay)
             c.decompose_junk_scrolls()  # phan giai cuon goi pet RAC (junk_scrolls.json) -> Vo Tuong Phien
-            # TU MO RONG TUI DO: mua slot toi khi gia lan KE TIEP vuot nguong user dien. Dat TRUOC
-            # cac viec don tui (ban Noi Dat / vut rac) de tui rong san, va truoc `use_items` de co
-            # cho nhan do. Mac dinh TAT.
-            if pcfg.get("auto_bag_expand") and int(pcfg.get("bag_expand_gold", 0) or 0) > 0:
-                try:
-                    c.tu_mo_rong_tui(int(pcfg.get("bag_expand_gold", 0) or 0))
-                except Exception as e:
-                    log.warning("[%s] loi tu mo rong tui do (bo qua): %s", label, e)
-            # TU CONG DIEM TIEM NANG cua NHAN VAT (bang rule rieng tung acc). Chi chay MOT LAN
-            # luc login, cung cho voi cac viec vat khac.
-            _tu_cong_diem(c, username, label)
-            # TU NANG SKILL NHAN VAT (bang rule rieng tung acc, giong Point). Dat NGAY SAU tu cong
-            # diem: cung la "tieu diem theo bang rule", va cung chi chay MOT LAN luc login.
-            _tu_nang_skill(c, username, label)
+            # ==== TAM TAT VIEC VAT 10/11/12/14 (theo yeu cau) ====
+            # Chi BO PHAN GOI, KHONG xoa ham - bat lai bang cach bo comment:
+            #   10 `tu_mo_rong_tui`          (client.py)
+            #   11 `_tu_cong_diem`           (run_party_digioi.py)
+            #   12 `_tu_nang_skill`          (run_party_digioi.py)
+            #   14 `auto_upgrade_pet_skills` (client.py)
+            #
+            # # TU MO RONG TUI DO: mua slot toi khi gia lan KE TIEP vuot nguong user dien. Dat TRUOC
+            # # cac viec don tui (ban Noi Dat / vut rac) de tui rong san, va truoc `use_items` de co
+            # # cho nhan do. Mac dinh TAT.
+            # if pcfg.get("auto_bag_expand") and int(pcfg.get("bag_expand_gold", 0) or 0) > 0:
+            #     try:
+            #         c.tu_mo_rong_tui(int(pcfg.get("bag_expand_gold", 0) or 0))
+            #     except Exception as e:
+            #         log.warning("[%s] loi tu mo rong tui do (bo qua): %s", label, e)
+            # # TU CONG DIEM TIEM NANG cua NHAN VAT (bang rule rieng tung acc). Chi chay MOT LAN
+            # # luc login, cung cho voi cac viec vat khac.
+            # _tu_cong_diem(c, username, label)
+            # # TU NANG SKILL NHAN VAT (bang rule rieng tung acc, giong Point). Dat NGAY SAU tu cong
+            # # diem: cung la "tieu diem theo bang rule", va cung chi chay MOT LAN luc login.
+            # _tu_nang_skill(c, username, label)
             _kiem_han_ba_dau(c, username, label)   # Ba Dau sap het han -> bao o man Chu y
-            if pcfg.get("auto_pet_skill", True):   # AUTO NANG SKILL PET: pet co diem skill -> nang (index 0->1->2 toi max)
-                try:
-                    _n = c.auto_upgrade_pet_skills()
-                    if _n:
-                        log.info("[%s] auto nang skill pet: da gui nang cho %d pet", label, _n)
-                except Exception as e:
-                    log.warning("[%s] loi auto nang skill pet (bo qua): %s", label, e)
+            # # AUTO NANG SKILL PET: pet co diem skill -> nang (index 0->1->2 toi max)
+            # if pcfg.get("auto_pet_skill", True):
+            #     try:
+            #         _n = c.auto_upgrade_pet_skills()
+            #         if _n:
+            #             log.info("[%s] auto nang skill pet: da gui nang cho %d pet", label, _n)
+            #     except Exception as e:
+            #         log.warning("[%s] loi auto nang skill pet (bo qua): %s", label, e)
             # SOI LO + xu ly theo config per-acc (ACCOUNT_FURNACE): tab bat + item auto mua / notify.
             # Config trong -> chi soi + log 3 tab (nhu Pha 1). Notify list -> log (Pha 2 GUI popup).
             try:

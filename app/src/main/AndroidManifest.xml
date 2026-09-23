@@ -12,14 +12,20 @@
         android:usesCleartextTraffic="false"
         android:theme="@style/AppTheme"
         android:label="@string/app_name"
-        android:icon="@drawable/ic_launcher">
-        <activity android:name=".SplashActivity" android:screenOrientation="portrait" android:exported="true">
+        android:icon="@drawable/ic_launcher"
+        android:resizeableActivity="true">
+        <!-- resizeableActivity=true: cho app chay dang CUA SO (multi-window / split-screen /
+             freeform tren DeX, tablet, hoac ROM bat dev option "Enable freeform windows") ->
+             mo song song voi app khac. -->
+        <activity android:name=".SplashActivity" android:screenOrientation="portrait" android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".MainActivity" android:screenOrientation="portrait" android:exported="true" />
+        <activity android:name=".MainActivity" android:screenOrientation="portrait" android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode" />
         <service
             android:name=".BotService"
             android:exported="false"

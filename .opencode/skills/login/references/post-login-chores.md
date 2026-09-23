@@ -25,11 +25,11 @@ toàn bộ khối này (đã làm ở phiên trước) để không lệch nhị
 | 7 | `claim_legion_gift()` | quà quân đoàn hằng ngày |
 | 8 | `claim_friend_gifts()` | tặng quà tất cả bạn + nhận quà bạn tặng |
 | 9 | `decompose_junk_scrolls()` | phân giải cuộn gọi pet rác |
-| 10 | `tu_mo_rong_tui()` | mua slot túi (đặt trước dọn túi) |
-| 11 | `_tu_cong_diem()` | tự cộng điểm tiềm năng (bảng rule riêng acc) |
-| 12 | `_tu_nang_skill()` | tự nâng skill nhân vật (ngay sau cộng điểm) |
+| 10 | `tu_mo_rong_tui()` | ⛔ **TẠM TẮT** (không gọi khi login) — hàm còn nguyên |
+| 11 | `_tu_cong_diem()` | ⛔ **TẠM TẮT** (không gọi khi login) — hàm còn nguyên |
+| 12 | `_tu_nang_skill()` | ⛔ **TẠM TẮT** (không gọi khi login) — hàm còn nguyên |
 | 13 | `_kiem_han_ba_dau()` | Bá Đầu sắp hết hạn → báo UI |
-| 14 | `auto_upgrade_pet_skills()` | auto nâng skill pet |
+| 14 | `auto_upgrade_pet_skills()` | ⛔ **TẠM TẮT** (không gọi khi login) — hàm còn nguyên |
 | 15 | `process_furnace()` | soi lò + mua/notify theo config per-acc |
 | 16 | `donate_legion()` | donate nguyên liệu quân đoàn (dọn túi) |
 | 17 | `tu_mo_hop_trang_bi()` | mở rương trang bị → phân giải / donate / vứt |
@@ -41,6 +41,10 @@ toàn bộ khối này (đã làm ở phiên trước) để không lệch nhị
 | 23 | mua shop | Hộ Phù / Hộp Thiên Châu / Triệu Gọi Bảo Hộp (theo RoleCount 0x55) |
 | 24 | `buy_hp_sp()` | mua HP/SP ở Trác Quận nếu dự trữ < ngưỡng |
 | 25 | `do_legion_boss()` | boss quân đoàn solo nếu còn lượt + hết cooldown |
+
+> **Đang tạm tắt 10/11/12/14:** trong `run_party_digioi.py::run_account` chỉ **comment phần GỌI**;
+> các hàm `tu_mo_rong_tui` (client), `_tu_cong_diem`, `_tu_nang_skill` (run_party_digioi),
+> `auto_upgrade_pet_skills` (client) **vẫn còn nguyên** — bỏ comment khối tương ứng để bật lại.
 
 ## Bỏ qua có điều kiện
 
