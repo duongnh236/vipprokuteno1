@@ -21,6 +21,7 @@ def _open_route_member_invites(client, st, username, label, generation, *, servi
 
 def _android_train_recovery_tick(c, st, username, pidx, stopped_fn, *, services):
     """Recover a lone member independently; only leader loss restarts the whole rally."""
+    log = getattr(services, "log", None)
     _nearest_safe = services._nearest_safe
     _workflow_leave_current_area = services._workflow_leave_current_area
     account_clients = services.account_clients
@@ -54,7 +55,22 @@ def _android_train_recovery_tick(c, st, username, pidx, stopped_fn, *, services)
     if st.get("ui_leader_recover"):
         if username != leader_user:
             if username not in st.setdefault("ui_recovery_city_arrived", set()):
-                _workflow_leave_current_area(c, abort)
+                try:
+                    _workflow_leave_current_area(c, abort)
+                except RuntimeError as exc:
+                    # Sau khi leader rot, server thinh thoang giu roster party "ma" va
+                    # khong ACK leave. Khong de ACK cu chan vinh vien ca luong recovery:
+                    # chi bo roster local trong dung nhanh leader-loss, roi ve thanh de
+                    # server chuyen scene va lap lai party moi. Loi combat/dung workflow
+                    # van duoc nem ra de retry an toan, khong teleport giua tran.
+                    if "Server chưa xác nhận rời party farm" not in str(exc):
+                        raise
+                    if log is not None:
+                        log.warning(
+                            "[%s] Reconnect leader: server khong ACK roi party cu; "
+                            "bo roster local ma va tiep tuc ve thanh", username)
+                    c.party_members = []
+                    c.party_leader = None
                 destination = c.nearest_smart_city(int(target[0]), exclude_map=int(target[0]))
                 if isinstance(destination, dict):
                     city, flag = destination.get("city"), destination.get("flag", 0)
@@ -85,7 +101,6 @@ def _android_train_recovery_tick(c, st, username, pidx, stopped_fn, *, services)
             return True
         if username not in st.setdefault("ui_recovery_safe_ready", {}):
             _workflow_leave_current_area(c, abort)
-            c._ui_auto_battle = True
             c.flee_mode = False
             c.combat_ready()
             if c.current_map != int(target[0]):
@@ -174,6 +189,9 @@ def _train_fallback_full_channel(c, st, users, cmd, generation, label, *, servic
     candidates = []
     for channel, (population, capacity) in list(c.channels.items()):
         channel = int(channel)
+        # Kenh DANG DUNG co the duoc them vao voi (None, None) -> so sanh None <= 0 se nem TypeError.
+        if population is None or capacity is None:
+            continue
         if channel == blocked or capacity <= 0:
             continue
         residents = sum(1 for u in users if (account_clients.get(u) is not None
@@ -258,6 +276,27 @@ def _farm_party_missing(pidx, users, leader, skip=(), *, services):
     return missing_from_server_roster(pidx, users, leader, skip, services=services)
 
 
+def _preempt_account_chores_for_train(pidx, *, services):
+    """START FARM owns the team: release stale chore state and pending party invites.
+
+    This is deliberately called only by the explicit Train entry point. Daily/Boss keep their
+    normal protection against being dragged into a party while their own workflow is active.
+    """
+    account_clients = services.account_clients
+    mark_done = getattr(services, "mark_account_task_done", lambda *_args, **_kwargs: None)
+    for username, _password, _leader, _keep in services.party_accounts(pidx):
+        client = account_clients.get(username)
+        if client is None or not getattr(client, "running", False):
+            continue
+        client._daily_hold = False
+        # Clear `login_chore` before opening the gate. The old state could otherwise keep every
+        # leader invitation in `_pending_party_invites` forever even after Train took ownership.
+        mark_done(username, "Start Farm giành quyền điều khiển")
+        open_invites = getattr(client, "set_party_invite_ready", None)
+        if callable(open_invites):
+            open_invites(True)
+
+
 def party_train_map(pidx, map_id, x, y, *, services, expected_generation=None):
     """Android AUTO BATTLE: gom/lap PT/route ca team den map + diem train roi bat combat."""
     _pstate = services._pstate
@@ -328,5 +367,8 @@ def party_train_map(pidx, map_id, x, y, *, services, expected_generation=None):
         st["kenh_ghim"] = None
         st["manual_train_channel"] = None
         st["manual_train_channel_ready"].clear()
+    # Never send/accept network packets while holding st["lock"]. Processing a pending invite can
+    # synchronously update the roster, so release the workflow lock first.
+    _preempt_account_chores_for_train(pidx, services=services)
     log.info(">>> PARTY %s: START TRAIN TEAM -> map %d bai (%d,%d)",
              pidx + 1, map_id, x, y)

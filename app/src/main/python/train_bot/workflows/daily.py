@@ -19,6 +19,7 @@ def _daily_return_to_city(c, username, stopped_fn, *, services):
         if stopped_fn() or c.current_map != 12001:
             raise RuntimeError("Chưa được server xác nhận tới Trác Quận")
         c.flee_mode = False
+        # combat_ready chi co tac dung khi nguoi dung da bat AUTO BATTLE cho account.
         c.combat_ready()
         return True
     except Exception as exc:

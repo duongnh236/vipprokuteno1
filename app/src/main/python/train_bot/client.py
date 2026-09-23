@@ -2323,7 +2323,9 @@ class GameClient:
         self.available = {}          # unit -> list (atype, target)
         self._acted_turn = False
         self._decision_timer = None
-        self.auto_combat = True
+        # Hai cong tac UI doc lap: AUTO BATTLE quyet dinh co gui lenh danh hay khong;
+        # AUTO TRUY KICH chi quyet dinh co chay hinh so 8 hay khong.
+        self.auto_combat = False
         self.auto_accept_party = True
         self.party_invite_ready = False
         self._pending_party_invites = collections.OrderedDict()
@@ -2393,11 +2395,16 @@ class GameClient:
         self._gift_status = {}        # gtype -> status phan hoi (S2C 0x57: 01 diem danh, 04 qua 14 ngay)
         self._last_guild_pkt = None   # cache goi 0x27 (guild) de resolve ten neu toi truoc 0x69
         self.flee_mode = False        # True = dang di chuyen -> vao battle thi BO CHAY (khong danh)
+        self._auto_mode = "off"       # compatibility cho dashboard/build cu
+        self._auto_battle_enabled = False
+        self._auto_pursuit_enabled = False
         self.dungeon_complete = False  # True khi nhan goi hoan thanh dungeon (S2C 0x14 sub 0x64)
         self._machinebox_map_cam = set()   # map bi server DUNG hop may (S:065-002) = map CAM
+        self._machinebox_force_paused = False  # flow chu dong tat de ve thanh/tap ket
+        self._machinebox_server_paused = False # da nhan ACK S:065-002 cua lenh pause gan nhat
         self._doi_kenh_tu = 0.0            # luc bat dau doi kenh (roster cua ca party dang bien dong)
         self._pb_ket_thuc_luc = 0.0    # luc nhan S:047-012 <副本結束> (pho ban TO DOI ket thuc)
-        self.submit_delay = 0.5      # delay truoc khi gui combat
+        self.submit_delay = 0.0      # nhan du packet luot cua minh -> worker gui ngay
         self._first_turn = True      # luot dau tran -> atype=2, sau -> atype=3
         self._battle_entered = False # da gui 0x41 "vao tran" chua
         self.channels = {}           # {so_kenh: (so_nguoi, suc_chua)} - tu S2C 0x07 list
@@ -2466,6 +2473,10 @@ class GameClient:
         self._dg_pursuit_paused = False
         self._area_combat_mode = None
         self._running_route = False   # dang chay auto run-around
+        # Moi account chi duoc co MOT lo trinh navigate_to con hieu luc. Neu hai workflow cung
+        # gui MOVE, lo trinh cu se keo nhan vat quay ve waypoint truoc.
+        self._nav_generation_lock = threading.RLock()
+        self._nav_generation = 0
         self.chuyen_map_luc = 0.0     # lan cuoi acc nay teleport (doi map) - xem `go_to_town`
         self._luot_da_gui = None      # (gen, turn, luc) - luot gan nhat DA gui lenh danh (moi acc)
         self._luot_cham_da_bao = None # (gen, turn) da bao "LUOT CHAM" roi -> khong bao lai
@@ -2884,7 +2895,15 @@ class GameClient:
     def combat_ready(self):
         """Sau khi DOI KENH / lap party, char co the mat combat-active -> gui LAI toan bo
         chuoi setup (gom 0x41 'san sang battle') de quai aggro lai."""
+        # Workflow Train/Daily/DG khong duoc tu bat danh. Chi nut AUTO BATTLE cua chinh
+        # account moi cap quyen re-arm hop may va gui lenh combat.
+        if not bool(getattr(self, "_auto_battle_enabled", False)):
+            log.debug("[%s] combat_ready bo qua: AUTO BATTLE dang tat", self._label)
+            return False
+        self._machinebox_force_paused = False
+        self._machinebox_server_paused = False
         self._login_setup()
+        return True
 
     # Ma LUA CHON cua hop thoai su kien - doc tu client (Logic_Event_EventHandler.lua:429-436,
     # 450-453 + EventManager.SelectEvent -> C:020-009 <事件選擇> +選擇碼(1)):
@@ -4667,9 +4686,14 @@ class GameClient:
         # start, KHONG ca _login_setup vi trong do co 0x7c/0x62 gay side-effect). Cach nhau it
         # nhat 30s de neu server co ly do dung that thi khong thanh vong gui lien tuc.
         elif opcode == 0x41 and len(pkt) >= 9 and pkt[7:9] == b"\x02\x00":
+            self._machinebox_server_paused = True
             # ACK cua CHINH MINH: _login_setup co chu y gui 0x41 0200 roi moi BAT lai o cuoi chuoi.
             # Khong loc thi bot tu chen goi bat-lai vao GIUA chuoi login (xem ghi chu o _login_setup)
             # -> vua thua, vua co nguy co lam hong trinh tu dang nhap.
+            if getattr(self, "_machinebox_force_paused", False):
+                log.info("[%s] HOP MAY: server da ACK tam dung cho flow ve thanh -> giu TAT",
+                         self._label)
+                return
             if time.time() - float(getattr(self, "_machinebox_pause_sent_at", 0.0) or 0.0) < 10.0:
                 return
             _last = getattr(self, "_machinebox_rearm_at", 0.0)
@@ -6387,11 +6411,10 @@ class GameClient:
     def _arm_decision(self):
         if self._decision_timer:
             self._decision_timer.cancel()
-        # PHO BAN TO DOI: delay gui 0x32 = RANDOM 0.5-2s (giong human, sau battle start) thay vi 0.3s
-        # co dinh. Cua so 20 phut tu luc vao pho ban (leader tao / member accept) -> tu het, train ve 0.3s.
+        # Khong chen delay nhan tao. Timer 0 van tach khoi receive thread, nen parser khong bi block;
+        # coordinator/generation ben `_send_combat` van chan trung va sai luot.
         if self.in_team_dungeon():
-            import random
-            delay = random.uniform(0.5, 2.0)
+            delay = 0.0
         else:
             delay = self.submit_delay
         self._decision_timer = threading.Timer(delay, self._make_decisions)
@@ -6432,14 +6455,15 @@ class GameClient:
             threading.Timer(1.0, self._reset_turn).start()
             return
         self._gate_retry = 0
-        # Neu stats chua load (hp_max=0) -> doi toi da 1s cho 0x0b kip den
+        # Neu stats chua load -> chi cho toi da 0.2s. Khong de mot packet stat cham lam ca luot
+        # dung 1 giay; turn sau server se day lai state.
         if self.state.char.hp_max == 0 and self.state.pet.hp_max == 0:
-            for _ in range(10):
+            for _ in range(2):
                 time.sleep(0.1)
                 if self.state.char.hp_max != 0 or self.state.pet.hp_max != 0:
                     break
             else:
-                log.warning("[%s] Stats chua load sau 1s -> bo qua luot", self._label)
+                log.warning("[%s] Stats chua load sau 0.2s -> bo qua luot", self._label)
                 self.available = {}
                 threading.Timer(1.5, self._reset_turn).start()
                 return
@@ -13191,6 +13215,27 @@ class GameClient:
         # (user xac nhan: chi co 1 kenh, thay het xung quanh, bot van bao moi dua 1 kenh).
         return True, ""
 
+    def nearby_other_team_count(self) -> int:
+        """Dem so DOI KHAC leader dang thay tan mat tren scene hien tai."""
+        if time.time() - float(getattr(self, "team_of_at", 0.0) or 0.0) > self.TEAM_OF_MAX_AGE:
+            return 0
+        team_of = getattr(self, "team_of", None) or {}
+        own_leader = self._doi_truong_dang_ket()
+        if own_leader is None and self.self_entity:
+            own_leader = bytes(self.self_entity)
+        leaders = set()
+        for entity, leader in list(team_of.items()):
+            if not entity or not leader:
+                continue
+            leader = bytes(leader)
+            if own_leader is not None and leader == bytes(own_leader):
+                continue
+            # Chi PlayerAppear 0x03 la bang chung thay tan mat. `nearby` con co the den tu
+            # 0x27/0900 (danh sach ten rong hon) nen khong du de ket luan dang o xung quanh.
+            if not self.da_thay_tan_mat(entity):
+                leaders.add(leader)
+        return len(leaders)
+
     def da_thay_tan_mat(self, entity: bytes):
         """Server DA TUNG bao "nguoi nay o cung scene + cung instance voi may" chua ("" = roi).
 
@@ -14640,7 +14685,11 @@ class GameClient:
         Tra True neu that su co gui lenh.
         """
         try:
-            if self.in_combat(idle_secs=1.0):
+            # `state.in_battle` la co CHUAN (bat moi luot 0x34/0x35, ha o 0x14 sub07/sub08 that).
+            # Truoc day chi hoi `in_combat(idle_secs=1.0)`: giua 2 luot (>1s) no tra False -> route
+            # VAN GUI MOVE trong tran -> tranh GIL voi luong gui lenh danh -> LENH DANH BI TRE
+            # (log 22/09 21:50:09 TURN START -> 21:50:19 moi BATTLE SEND, cham 10s).
+            if getattr(self.state, "in_battle", False) or self.in_combat(idle_secs=1.0):
                 log.debug("[%s] move_to (%d,%d): DANG TRONG TRAN -> khong di, khong cong pos "
                           "(giong client)", self._label, x, y)
                 return False
@@ -14942,6 +14991,8 @@ class GameClient:
             _them = 0
             _cho_bu = 0.0
             while _them < 8 and self.running:
+                if not _nav_con_hieu_luc():
+                    return False
                 if abort and abort():
                     log.info("[%s] navigate_to: abort khi di bu -> dung", self._label)
                     return False
@@ -15085,44 +15136,85 @@ class GameClient:
         self._wait_combat_clear(idle=2.0, cap=120.0)
         self.move_to(*self.DIGIOI_CONG_RA);         time.sleep(step_wait)
 
+    def apply_auto_mode(self, mode, enabled=None):
+        """Bat/tat hai cong tac DOC LAP tren tab account.
+
+        ``battle`` chi bat engine danh va dung setting Pet & Skill.
+        ``pursuit`` chi chay Ground path hinh so 8, tuyet doi khong tu bat engine danh.
+        ``enabled=None`` nghia la nguoi dung bam nut -> dao trang thai hien tai.
+        """
+        mode = str(mode or "off")
+        if mode == "off":
+            self._auto_battle_enabled = False
+            self._auto_pursuit_enabled = False
+        elif mode == "battle":
+            old = bool(getattr(self, "_auto_battle_enabled", False))
+            self._auto_battle_enabled = (not old) if enabled is None else bool(enabled)
+        elif mode == "pursuit":
+            old = bool(getattr(self, "_auto_pursuit_enabled", False))
+            self._auto_pursuit_enabled = (not old) if enabled is None else bool(enabled)
+        else:
+            return False
+
+        battle = bool(self._auto_battle_enabled)
+        pursuit = bool(self._auto_pursuit_enabled)
+        self._ui_auto_battle = battle
+        self.auto_combat = battle
+        self._dg_pursuit_paused = not pursuit
+        self._auto_mode = ("both" if battle and pursuit else
+                           "battle" if battle else "pursuit" if pursuit else "off")
+        if pursuit:
+            try: self.start_run_around(stay_in_di_gioi=False)
+            except Exception: pass
+        else:
+            try: self.stop_run_around()
+            except Exception: pass
+        if battle:
+            # Nap lai Pet & Skill MOI NHAT luc bam AUTO BATTLE, khong giu snapshot cu tu login.
+            latest = ((getattr(config, "ACCOUNT_BATTLE", {}) or {})
+                      .get(getattr(self, "_username", None), {}) or {})
+            self.state.battle_config = dict(latest)
+            self.flee_mode = False
+            # combat_ready gui ca chuoi setup (~2 giay do protocol can settle 0.2s/goi).
+            # Khong block nut UI: cong tac da BAT ngay, re-arm chay nen rieng.
+            if not self.in_combat():
+                def _rearm_after_toggle():
+                    try:
+                        if self.running and self._auto_battle_enabled and not self.in_combat():
+                            self.combat_ready()
+                    except Exception as exc:
+                        log.warning("[%s] AUTO BATTLE re-arm loi: %s", self._label, exc)
+                threading.Thread(target=_rearm_after_toggle,
+                                 name="auto-battle-rearm-%s" % self._username,
+                                 daemon=True).start()
+        log.info("[%s] AUTO: battle=%s pursuit=%s", self._label, battle, pursuit)
+        return True
+
     def sync_area_combat_mode(self, allow_pursuit=True):
-        """DG uses existing search movement; other maps use normal auto with no roaming."""
+        """Dong bo hai cong tac doc lap, khong de workflow tu bat danh/truy kich."""
         if not self.running or self.current_map is None:
             return
-        in_dg = self.in_di_gioi()
-        was_dg = bool(getattr(self, "_area_was_dg", False))
-        self._area_was_dg = in_dg
-        if not in_dg:
-            self._dg_pursuit_paused = False
-        blocked = (not allow_pursuit or self._dg_pursuit_paused
+        blocked = (not allow_pursuit or not getattr(self, "_auto_pursuit_enabled", False)
                    or getattr(self, "_daily_use_selected_pet", False)
                    or getattr(self, "_daily_hold", False)
                    or getattr(self, "_individual_safe_logout", False))
         # A party member follows its leader; never issue independent movement commands.
         follower = bool(self.party_leader and self.party_leader != self.self_entity)
-        if was_dg and not in_dg and not blocked:
-            self.flee_mode = False
-            self._ui_auto_battle = True
-        mode = "pursuit" if in_dg and not blocked else "normal"
+        mode = "pursuit" if not blocked else "normal"
         changed = mode != self._area_combat_mode
         self._area_combat_mode = mode
         if mode == "normal" or follower:
             if self._running_route:
                 self.stop_run_around()
-        elif self.has_hp_and_sp_items():
-            self.flee_mode = False
-            self.start_run_around()
         else:
-            self.stop_run_around()  # Preserve the existing no-potions safety guard.
+            self.start_run_around(stay_in_di_gioi=False)
         if changed:
             log.info("[%s] Chế độ đánh: %s", self._label,
                      "Truy kích Dị giới" if mode == "pursuit" else "Auto bình thường")
-            if not blocked and not self.in_combat() and not self.flee_mode:
-                self.combat_ready()
 
     def start_run_around(self, stay_in_di_gioi=True):
-        """Only search inside confirmed DG, never move a party follower independently."""
-        if (not self.in_di_gioi() or self._dg_pursuit_paused
+        """Chi chay hinh so 8; khong thay doi trang thai auto combat."""
+        if (not getattr(self, "_auto_pursuit_enabled", False)
                 or getattr(self, "_daily_use_selected_pet", False)
                 or getattr(self, "_daily_hold", False)
                 or getattr(self, "_individual_safe_logout", False)
@@ -15134,7 +15226,7 @@ class GameClient:
             self._run_around_generation += 1
             generation = self._run_around_generation
             self._running_route = True
-            threading.Thread(target=self._run_around_loop, args=(True, generation),
+            threading.Thread(target=self._run_around_loop, args=(stay_in_di_gioi, generation),
                              name="dg-pursuit-%s" % self._username, daemon=True).start()
 
     def stop_run_around(self):
@@ -15164,19 +15256,21 @@ class GameClient:
         def cancelled():
             return (not self.running or not self._running_route
                     or generation != self._run_around_generation
-                    or self.current_map != map_id or not self.in_di_gioi()
-                    or self._dg_pursuit_paused or self.flee_mode
+                    or self.current_map != map_id
+                    or not getattr(self, "_auto_pursuit_enabled", False)
                     or getattr(self, "_daily_use_selected_pet", False)
                     or getattr(self, "_daily_hold", False)
                     or getattr(self, "_individual_safe_logout", False)
                     or bool(self.party_leader and self.party_leader != self.self_entity))
         try:
-            anchor = self._di_gioi_anchor or self.pos
+            # Moi lan bat lay vi tri hien tai lam tam so 8; khong tai su dung anchor Di Gioi cu
+            # khi nguoi dung da sang map Train/Daily khac.
+            anchor = self.pos
             if not anchor or not self.pos:
                 return  # No invented coordinates when server position is unknown.
             anchor = self._bam_o_di_duoc(anchor, self.pos)
             if anchor is None:
-                log.warning("[%s] Truy kích: chưa có Ground xác minh; đứng tự đánh", self._label)
+                log.warning("[%s] Truy kích: chưa có Ground xác minh; không di chuyển", self._label)
                 return
             i = 0
             while not cancelled():

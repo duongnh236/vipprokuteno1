@@ -27,7 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 final class UpdateManager {
-    private static final String LATEST_RELEASE="https://api.github.com/repos/duongnh236/ts_bot/releases/latest";
+    private static final String LATEST_RELEASE="https://api.github.com/repos/duongnh236/vipprokuteno1/releases/latest";
     private static final String INSTALL_ACTION="com.fen.tsbot.UPDATE_INSTALL_RESULT";
     private static final ExecutorService IO=Executors.newSingleThreadExecutor();
 
@@ -57,7 +57,9 @@ final class UpdateManager {
                 JSONArray assets=root.optJSONArray("assets");String apkUrl=null;
                 if(assets!=null)for(int i=0;i<assets.length();i++){
                     JSONObject asset=assets.optJSONObject(i);
-                    if(asset!=null&&asset.optString("name","").toLowerCase(Locale.ROOT).endsWith(".apk")){
+                    String assetName=asset==null?"":asset.optString("name","").toLowerCase(Locale.ROOT);
+                    // Khong bao gio chon artifact unsigned neu Release vo tinh dinh kem nhieu APK.
+                    if(asset!=null&&assetName.endsWith(".apk")&&!assetName.contains("unsigned")){
                         apkUrl=asset.optString("browser_download_url","");if(!apkUrl.isEmpty())break;
                     }
                 }

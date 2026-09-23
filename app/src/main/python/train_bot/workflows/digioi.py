@@ -46,7 +46,6 @@ def _android_dg_train_handoff(pidx, st, *, services):
                             client = account_clients[user]
                             client.stop_run_around()
                             client.flee_mode = False
-                            client._ui_auto_battle = True
                         st["ui_dg_transition_pending"] = False
                     party_train_map(pidx, *target, expected_generation=token)
                     log.info("[party %d] DG -> FARM: du %d account, bat dau gom/phan khu manual/lap party/ra bai", pidx + 1, len(users))

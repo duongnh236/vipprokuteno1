@@ -261,7 +261,7 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(destination, 23803)
             self.assertEqual(set(leader.party_members), {u.encode() for u in users[1:]})
             self.assertTrue(all(c.current_channel == 1 for c in clients.values()))
-            self.assertFalse(kw["flee"])
+            self.assertTrue(kw["flee"])
             for c in clients.values():
                 c.current_map = destination
             return True
@@ -443,35 +443,32 @@ class SafetyTests(unittest.TestCase):
         fn = function("train_bot/run_party_digioi.py", "_dt_party_usernames", ns)
         self.assertEqual(fn(0), ["leader", "member"])
 
-    def test_dg_pursuit_stops_outside_and_during_daily(self):
+    def test_pursuit_is_movement_only_and_stops_when_workflow_blocks_it(self):
         tree = ast.parse((ROOT / "train_bot/client.py").read_text())
         node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "sync_area_combat_mode")
         ns = {"log": logging.getLogger("test")}
         exec(compile(ast.Module(body=[node], type_ignores=[]), "client.py", "exec"), ns)
-        client = SimpleNamespace(_label="test", running=True, current_map=49942, _dg_pursuit_paused=False,
+        client = SimpleNamespace(_label="test", running=True, current_map=49942,
+                                 _auto_pursuit_enabled=True, _auto_battle_enabled=False,
                                  _area_combat_mode=None, _running_route=False, party_leader=None,
                                  self_entity=b"self", flee_mode=True,
-                                 in_di_gioi=lambda: True, has_hp_and_sp_items=lambda: True,
                                  in_combat=lambda: False, start_run_around=Mock(),
                                  stop_run_around=Mock(), combat_ready=Mock())
         fn = ns["sync_area_combat_mode"]
         fn(client)
         self.assertEqual(client._area_combat_mode, "pursuit")
-        self.assertFalse(client.flee_mode)
-        client.start_run_around.assert_called_once()
+        self.assertTrue(client.flee_mode)  # pursuit khong duoc sua mode chien dau
+        client.start_run_around.assert_called_once_with(stay_in_di_gioi=False)
+        client.combat_ready.assert_not_called()
         client._running_route = True
         fn(client, allow_pursuit=False)
         self.assertEqual(client._area_combat_mode, "normal")
         client.stop_run_around.assert_called_once()
-        client.stop_run_around.reset_mock()
-        client.in_di_gioi = lambda: False
-        client.current_map = 12001
-        client.flee_mode = True
+        client.stop_run_around.reset_mock(); client._running_route = False
         fn(client)
-        client.stop_run_around.assert_called_once()
-        self.assertEqual(client.start_run_around.call_count, 1)
-        self.assertFalse(client.flee_mode)
-        self.assertTrue(client._ui_auto_battle)
+        self.assertEqual(client._area_combat_mode, "pursuit")
+        self.assertEqual(client.start_run_around.call_count, 2)
+        self.assertFalse(client._auto_battle_enabled)
 
     def test_dg_pursuit_requires_ground_and_generation(self):
         source = (ROOT / "train_bot/client.py").read_text()
@@ -573,8 +570,27 @@ class SafetyTests(unittest.TestCase):
         source = (ROOT / "train_bot/run_party_digioi.py").read_text()
         self.assertIn('if task != "team_dungeon":', source)
         self.assertIn('st.get("daily_team_generation") != cmd_gen_handled', source)
-        self.assertIn('route_flee = expected <= 1 and kind != "train"', source)
-        self.assertIn('c.navigate_to(tx, ty, flee=False,', source)
+        self.assertIn('route_flee = kind == "train" or expected <= 1', source)
+        self.assertIn('c.navigate_to(tx, ty, flee=True,', source)
+
+    def test_navigation_never_counts_a_move_rejected_by_combat(self):
+        source = (ROOT / "train_bot/client.py").read_text()
+        start = source.index("    def navigate_to(")
+        end = source.index("\n    def follow_path(", start)
+        navigate = source[start:end]
+        # Dinh tran giua duong -> lenh move bi NUOT -> KHONG duoc tu nhan "da toi".
+        self.assertIn("_co_tran_giua_duong", navigate)
+        self.assertIn("KHONG nhan la da toi", navigate)
+        # CHAN MA 14: khong bao gio gui 1 lenh move xa hon MOVE_XA_TOI_DA, va _enter_gate phai
+        # chia nho buoc toi cong (log 22/09 16:39:13: dist=1800 -> ma 14).
+        self.assertIn("MOVE_XA_TOI_DA", source)
+        self.assertIn("self._move_chia_doan(x, y)", source)
+        self.assertIn("_nav_ok", source)   # execute_smart_route khong goi _enter_gate khi navigate fail
+
+    def test_train_members_never_advance_gate_events_on_their_own(self):
+        source = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertNotIn("gate_follow", source)
+        self.assertNotIn("member vua xong battle cong -> bam tiep thoai", source)
 
     def test_unknown_exp_level_not_guessed(self):
         ns = {"_CHAR_EXP_LEVELS": {155: (236222752, 6290520)}}

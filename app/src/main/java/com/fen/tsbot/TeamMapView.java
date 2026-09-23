@@ -15,6 +15,7 @@ public class TeamMapView extends View {
     private final int bg=Color.rgb(7,16,29), grid=Color.rgb(27,49,72), gold=Color.rgb(229,184,83);
     private double loX,hiX,loY,hiY; private float plotLeft,plotRight,plotTop,plotBottom; private boolean hasBounds=false;
     private double tapX,tapY; private boolean hasTap=false; private JSONArray route=new JSONArray(); private OnMapTapListener tapListener;
+    private android.graphics.Bitmap terrainBmp; private String terrainBmpKey="";
     public interface OnMapTapListener{void onMapTap(int x,int y);}
 
     public TeamMapView(Context c){super(c);p.setTypeface(Typeface.create(Typeface.MONOSPACE,Typeface.NORMAL));setBackgroundColor(bg);}
@@ -25,6 +26,43 @@ public class TeamMapView extends View {
     private void tag(Canvas c,String s,float x,float y,float size,int color){p.setTextSize(size);p.setStyle(Paint.Style.FILL);float width=p.measureText(s);p.setColor(Color.argb(205,5,12,22));c.drawRoundRect(x-4,y-size-3,x+width+4,y+5,5,5,p);text(c,s,x,y,size,color);}
     private void dot(Canvas c,float x,float y,float radius,int color){p.setStyle(Paint.Style.FILL);p.setColor(color);c.drawCircle(x,y,radius,p);p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(2);p.setColor(Color.WHITE);c.drawCircle(x,y,radius,p);}
     private boolean blocked(byte[] data,int gh,int x,int y){if(x<0||y<0||x*gh+y>=data.length)return true;int v=data[x*gh+y]&255;return (v&1)!=0||(v&4)!=0;}
+
+    // UI bao con thieu luoi va cham cua map hien tai -> nho bridge gui lai chuoi base64 nang.
+    public synchronized boolean needsTerrain(){return terrainData==null||terrainData.length==0;}
+
+    private PointF project(double x,double y){return new PointF((float)(plotLeft+(x-loX)/(hiX-loX)*(plotRight-plotLeft)),(float)(plotTop+(y-loY)/(hiY-loY)*(plotBottom-plotTop)));}
+
+    // Ve luoi va cham MOT LAN vao Bitmap roi cache. Truoc day vong lap gw*gh chay lai MOI frame
+    // (poll 1 giay) -> nghen UI. Bitmap chi ve lai khi doi map / doi vung nhin / co du lieu moi.
+    private synchronized void drawTerrainCached(Canvas c,JSONObject collision){
+        int w=getWidth(),h=getHeight();if(w<=0||h<=0)return;
+        String key=snapshot.optInt("map")+":"+loX+":"+hiX+":"+loY+":"+hiY+":"+w+":"+h+":"+terrainMap+":"+System.identityHashCode(terrainData);
+        if(terrainBmp==null||terrainBmp.getWidth()!=w||terrainBmp.getHeight()!=h||!key.equals(terrainBmpKey)){
+            if(terrainBmp==null||terrainBmp.getWidth()!=w||terrainBmp.getHeight()!=h)terrainBmp=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);
+            Canvas bc=new Canvas(terrainBmp);bc.drawColor(Color.TRANSPARENT,android.graphics.PorterDuff.Mode.CLEAR);renderTerrain(bc,collision);terrainBmpKey=key;
+        }
+        c.drawBitmap(terrainBmp,0,0,p);
+    }
+    private void renderTerrain(Canvas c,JSONObject collision){
+        if(collision==null||collision.optInt("grid_w")<=0)return;
+        try{
+            int gw=collision.getInt("grid_w"),gh=collision.getInt("grid_h"),ox=collision.getInt("origin_x"),oy=collision.getInt("origin_y"),cell=collision.optInt("cell",20);
+            byte[] data=terrainData;if(data.length<gw*gh)return;
+            c.save();c.clipRect(plotLeft,plotTop,plotRight,plotBottom);
+            for(int gx=0;gx<gw;gx++){double x0=ox+gx*cell,x1=x0+cell;if(x1<loX||x0>hiX)continue;
+                for(int gy=0;gy<gh;gy++){double y0=oy+gy*cell,y1=y0+cell;if(y1<loY||y0>hiY)continue;
+                    int v=data[gx*gh+gy]&255;boolean wall=(v&1)!=0||(v&4)!=0,sea=(v&2)!=0;
+                    PointF a=project(x0,y0),b=project(x1,y1);
+                    p.setStyle(Paint.Style.FILL);p.setColor(wall?Color.argb(155,90,28,35):(sea?Color.argb(105,25,82,125):Color.argb(35,70,145,105)));c.drawRect(a.x,a.y,b.x,b.y,p);
+                    if(wall){p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(1.5f);p.setColor(Color.rgb(225,75,75));
+                        if(!blocked(data,gh,gx-1,gy))c.drawLine(a.x,a.y,a.x,b.y,p);
+                        if(!blocked(data,gh,gx+1,gy))c.drawLine(b.x,a.y,b.x,b.y,p);
+                        if(!blocked(data,gh,gx,gy-1))c.drawLine(a.x,a.y,b.x,a.y,p);
+                        if(!blocked(data,gh,gx,gy+1))c.drawLine(a.x,b.y,b.x,b.y,p);}
+                }}
+            c.restore();
+        }catch(Exception ignored){}
+    }
 
     @Override protected synchronized void onDraw(Canvas c){super.onDraw(c);float w=getWidth(),h=getHeight();
         String place=snapshot.optString("map_name","Chưa login");int map=snapshot.optInt("map"),channel=snapshot.optInt("channel");
@@ -43,7 +81,7 @@ public class TeamMapView extends View {
         p.setStrokeWidth(1);p.setColor(grid);for(int i=0;i<=8;i++){float x=left+(right-left)*i/8f,y=top+(bottom-top)*i/8f;c.drawLine(x,top,x,bottom,p);c.drawLine(left,y,right,y,p);}
         loX=minX;hiX=maxX;loY=minY;hiY=maxY;plotLeft=left;plotRight=right;plotTop=top;plotBottom=bottom;hasBounds=true;
         java.util.function.BiFunction<Double,Double,PointF> xy=(x,y)->new PointF((float)(left+(x-loX)/(hiX-loX)*(right-left)),(float)(top+(y-loY)/(hiY-loY)*(bottom-top)));
-JSONObject collision=snapshot.optJSONObject("collision");if(collision!=null&&collision.optInt("grid_w")>0){try{int gw=collision.getInt("grid_w"),gh=collision.getInt("grid_h"),ox=collision.getInt("origin_x"),oy=collision.getInt("origin_y"),cell=collision.optInt("cell",20);byte[] data=terrainData;if(data.length<gw*gh)throw new IllegalArgumentException("Incomplete terrain");c.save();c.clipRect(left,top,right,bottom);for(int gx=0;gx<gw;gx++){double x0=ox+gx*cell,x1=x0+cell;if(x1<loX||x0>hiX)continue;for(int gy=0;gy<gh;gy++){double y0=oy+gy*cell,y1=y0+cell;if(y1<loY||y0>hiY)continue;int v=data[gx*gh+gy]&255;boolean wall=(v&1)!=0||(v&4)!=0,sea=(v&2)!=0;PointF a=xy.apply(x0,y0),b=xy.apply(x1,y1);p.setStyle(Paint.Style.FILL);p.setColor(wall?Color.argb(155,90,28,35):(sea?Color.argb(105,25,82,125):Color.argb(35,70,145,105)));c.drawRect(a.x,a.y,b.x,b.y,p);if(wall){p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(1.5f);p.setColor(Color.rgb(225,75,75));if(!blocked(data,gh,gx-1,gy))c.drawLine(a.x,a.y,a.x,b.y,p);if(!blocked(data,gh,gx+1,gy))c.drawLine(b.x,a.y,b.x,b.y,p);if(!blocked(data,gh,gx,gy-1))c.drawLine(a.x,a.y,b.x,a.y,p);if(!blocked(data,gh,gx,gy+1))c.drawLine(a.x,b.y,b.x,b.y,p);}}}c.restore();}catch(Exception ignored){}}
+JSONObject collision=snapshot.optJSONObject("collision");drawTerrainCached(c,collision);
         if(route!=null&&route.length()>1){p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(5);p.setStrokeCap(Paint.Cap.ROUND);p.setStrokeJoin(Paint.Join.ROUND);p.setColor(Color.rgb(255,215,70));Path line=new Path();for(int i=0;i<route.length();i++){JSONArray q=route.optJSONArray(i);if(q==null)continue;PointF a=xy.apply(q.optDouble(0),q.optDouble(1));if(i==0)line.moveTo(a.x,a.y);else line.lineTo(a.x,a.y);}c.drawPath(line,p);p.setStrokeCap(Paint.Cap.BUTT);}
         if(safe!=null)for(int i=0;i<safe.length();i++){JSONArray q=safe.optJSONArray(i);if(q!=null){PointF a=xy.apply(q.optDouble(0),q.optDouble(1));p.setColor(Color.rgb(65,170,120));p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(3);c.drawCircle(a.x,a.y,10,p);text(c,"SAFE",a.x+12,a.y,10,Color.rgb(100,220,160));}}
         JSONArray tq=snapshot.optJSONArray("target");if(tq!=null){PointF a=xy.apply(tq.optDouble(0),tq.optDouble(1));p.setColor(Color.RED);p.setStrokeWidth(3);c.drawLine(a.x-9,a.y-9,a.x+9,a.y+9,p);c.drawLine(a.x+9,a.y-9,a.x-9,a.y+9,p);text(c,"BÃI TRAIN",a.x+12,a.y,11,Color.rgb(255,120,100));}

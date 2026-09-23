@@ -13,6 +13,9 @@ _runner = None
 _last_error = ""
 _lock = threading.RLock()
 _ground_ui_cache = {}
+# Map_id cua lan CUOI cung da gui base64 luoi va cham cho UI. Luoi va cham nang (~hang chuc KB)
+# va khong doi giua cac nhip poll 1s -> chi gui lai khi UI bao can (doi map / view moi tao).
+_ground_ui_last_collision_map = None
 _account_settings_lock = threading.RLock()
 _account_slots = {}
 _selected_leader_user = None
@@ -446,6 +449,14 @@ def _restore_account_settings(username):
     if not isinstance(getattr(config, "ACCOUNT_DEATH", None), dict):
         config.ACCOUNT_DEATH = {}
     config.ACCOUNT_DEATH[str(username)] = dict(saved.get("death_return") or {"character": True, "pet": True})
+    # Hai cong tac doc lap, chi nguoi dung bam moi bat.
+    if not isinstance(getattr(config, "ACCOUNT_AUTO_MODE", None), dict):
+        config.ACCOUNT_AUTO_MODE = {}
+    battle_on = bool(saved.get("auto_battle_enabled", False))
+    pursuit_on = bool(saved.get("auto_pursuit_enabled", False))
+    config.ACCOUNT_AUTO_MODE[str(username)] = {
+        "battle": battle_on, "pursuit": pursuit_on,
+    }
     return saved
 
 
@@ -470,6 +481,60 @@ def apply_death_settings_json(username, character=True, pet=True):
             if client.running:
                 client.sync_machinebox_flags()
         return json.dumps({"ok": True})
+    except Exception as e:
+        return json.dumps({"ok": False, "message": str(e)}, ensure_ascii=False)
+
+
+def set_auto_mode_json(username, mode):
+    """Dao cong tac AUTO BATTLE hoac AUTO TRUY KICH doc lap cho mot account."""
+    try:
+        username = str(username or "").strip()
+        if not username:
+            raise ValueError("Chưa có account")
+        mode = str(mode or "off")
+        if mode not in ("battle", "pursuit"):
+            raise ValueError("Chế độ auto không hợp lệ")
+        client = _get_runner().account_clients.get(username)
+        if client is None or not getattr(client, "running", False):
+            raise RuntimeError("Account chưa online")
+        client.apply_auto_mode(mode)  # enabled=None: dao trang thai nut vua bam
+        # Nut tay la quyet dinh moi nhat. Khong cho vong account restore snapshot cu sau do
+        # va dao/ghi de trang thai cua account vua bam.
+        client._auto_flags_restored = True
+        battle_on = bool(getattr(client, "_auto_battle_enabled", False))
+        pursuit_on = bool(getattr(client, "_auto_pursuit_enabled", False))
+        from train_bot import config
+        with _account_settings_lock:
+            saved = _load_account_settings().get(username, {})
+            saved = dict(saved) if isinstance(saved, dict) else {}
+            saved["auto_battle_enabled"] = battle_on
+            saved["auto_pursuit_enabled"] = pursuit_on
+            saved.pop("auto_mode", None)
+            _save_account_setting(username, saved)
+        if not isinstance(getattr(config, "ACCOUNT_AUTO_MODE", None), dict):
+            config.ACCOUNT_AUTO_MODE = {}
+        config.ACCOUNT_AUTO_MODE[username] = {"battle": battle_on, "pursuit": pursuit_on}
+        state = battle_on if mode == "battle" else pursuit_on
+        label = "AUTO BATTLE" if mode == "battle" else "AUTO TRUY KÍCH"
+        return json.dumps({"ok": True, "battle": battle_on, "pursuit": pursuit_on,
+                           "message": "%s: %s" % (label, "BẬT" if state else "TẮT")},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "message": str(e)}, ensure_ascii=False)
+
+
+def set_auto_mode_slot_json(slot, expected_username, mode):
+    """AUTO theo dung slot UI; username chi dung de chan snapshot/tab bi lech."""
+    try:
+        slot = int(slot)
+        rows = list(_get_runner().party_accounts(0))
+        if slot < 0 or slot >= len(rows):
+            raise ValueError("Slot account không hợp lệ")
+        username = str(rows[slot][0] or "").strip()
+        expected = str(expected_username or "").strip()
+        if not username or (expected and username != expected):
+            raise RuntimeError("Dữ liệu tab đã thay đổi, vui lòng bấm lại")
+        return set_auto_mode_json(username, mode)
     except Exception as e:
         return json.dumps({"ok": False, "message": str(e)}, ensure_ascii=False)
 
@@ -881,55 +946,14 @@ def stop_one_json(username):
 
 
 def auto_battle_one_json(username, map_id=0, x=0, y=0):
-    """Dua client dang online toi bai da chon roi bat combat; khong start/relogin thread."""
+    """Compatibility API: AUTO BATTLE chi dao cong tac danh, khong con route toi bai farm."""
     try:
         username = str(username or "").strip()
         runner = _get_runner()
         client = runner.account_clients.get(username)
         if client is None or not getattr(client, "running", False):
             raise RuntimeError("Account dang offline; bam LOGIN truoc")
-        map_id, x, y = int(map_id or 0), int(x or 0), int(y or 0)
-        current_map = int(getattr(client, "current_map", 0) or 0)
-        if not map_id:
-            map_id = current_map
-        if not (x and y):
-            from train_bot import config
-            spots = list((config.TRAIN_MAPS.get(map_id) or {}).get("mobs") or [])
-            if spots:
-                x, y = int(spots[0][0]), int(spots[0][1])
-        if not (x and y):
-            raise RuntimeError("Map da chon chua co diem farm; hay chon toa do tai Dieu Khien")
-
-        target = (x, y)
-        client._ui_auto_battle = False
-        client.flee_mode = True
-
-        def _route_and_fight():
-            try:
-                ok = False
-                if int(getattr(client, "current_map", 0) or 0) != map_id:
-                    ok = bool(client.follow_smart_route(map_id, target, flee=True))
-                else:
-                    ground = client.get_ground_store()
-                    pos = getattr(client, "pos", None)
-                    safe_target = ground.nearest_walkable_world(map_id, target, pos) if ground is not None and pos else None
-                    if safe_target is not None:
-                        ok = bool(client.navigate_to(int(safe_target[0]), int(safe_target[1]),
-                                                     flee=True, require_smart_path=True))
-                if not ok or int(getattr(client, "current_map", 0) or 0) != map_id:
-                    return
-                client._ui_auto_battle = True
-                client.flee_mode = False
-                client.combat_ready()
-            except Exception:
-                traceback.print_exc()
-
-        threading.Thread(target=_route_and_fight, name="auto-battle-%s" % username, daemon=True).start()
-        if current_map == map_id:
-            message = "Dang ve duong an toan toi X %d, Y %d; den noi se tu bat battle (khong login lai)" % (x, y)
-        else:
-            message = "Dang dua %s tu map %d toi bai map %d, X %d Y %d; den noi moi bat battle (khong login lai)" % (username, current_map, map_id, x, y)
-        return json.dumps({"ok": True, "message": message}, ensure_ascii=False)
+        return set_auto_mode_json(username, "battle")
     except Exception as exc:
         return json.dumps({"ok": False, "message": "%s" % exc}, ensure_ascii=False)
 
@@ -987,7 +1011,6 @@ def start_farm_mode_json(mode, map_id, x, y, di_gioi_level=2):
             st["ui_mode_restart_users"] = {u for u, _ in live}
             for _, c in live:
                 c._daily_hold = False
-                c._ui_auto_battle = True
                 c._ui_mode_restart = True
         dg_levels = [10, 25, 40, 55, 70, 85, 100, 110, 120, 130, 140, 150, 160, 170, 180]
         return json.dumps({"ok": True, "message": "Đã chạy Dị giới cấp %d → farm: chờ hết trận, vào Dị giới; cả team hết giờ sẽ ra bãi farm đã chọn" % dg_levels[di_gioi_level - 1]}, ensure_ascii=False)
@@ -1020,11 +1043,35 @@ def start_event_json(event_key="npc_40"):
             raise ValueError("Không tìm thấy event '%s' trong events.json" % event_key)
         if any(c.in_team_dungeon() for _, c in live):
             raise RuntimeError("Hãy hoàn tất phụ bản hiện tại trước")
+        # CHONG MA 90: doi mode = relogin CA TEAM. Neu con acc DANG DANG NHAP (chua vao world) ma
+        # ep doi tiep -> cac lan dang nhap chong len nhau -> server chan toc do `ma 90` -> OFF hang
+        # loat (bug that 21/09: 33 lan ma 90 khi lien tuc doi mode event<->stand). Bat buoc cho xong.
+        _dang_login = [u for u, c in live
+                       if getattr(c, "self_entity", None) is None
+                       or getattr(c, "current_map", None) is None]
+        if _dang_login:
+            raise RuntimeError("Có account đang đăng nhập (%s); chờ vào world xong rồi hãy bấm 40 NPC"
+                               % ", ".join(_dang_login))
+        # Da o DUNG event nay VA dang danh (chua thua/xong) -> khong ep relogin nua, chi bao.
+        _pcfg = config.PARTY_CONFIG.get(0) or {}
+        if (str(_pcfg.get("mode") or "") == "event"
+                and str(_pcfg.get("event_key") or "") == event_key
+                and not st.get("event_battle_done").is_set()
+                and not st.get("go_claim").is_set()
+                and not st.get("daily_active")):
+            log.info(">>> 40 NPC: team DA o event %s va dang danh -> khong ep doi mode (tranh ma 90)",
+                     event_key)
+            return json.dumps({"ok": True, "message":
+                               "Team đã ở event %s và đang đánh rồi; không chuyển lại (tránh mã 90)"
+                               % (ev.get("label") or event_key)}, ensure_ascii=False)
+        log.info(">>> 40 NPC: nhan lenh chuyen CA TEAM sang event %s (se relogin doi mode)", event_key)
         with st["lock"]:
             if st.get("daily_active") or st.get("leader_switch_pending") or st.get("ui_mode_restart_users"):
                 raise RuntimeError("Luồng team khác đang chạy; hãy chờ hoàn tất")
             from train_bot.workflows.lifecycle import activate_locked
             activate_locked(st, "event")
+            # Nguoi dung bam lai nut -> xoa khoa ma 5 (thu mo lai theo y nguoi dung).
+            st["event_blocked_until"] = 0.0
             config.PARTY_CONFIG[0].update(mode="event", event_key=event_key, npc40_force=True,
                                          train_pick="", do_daily=False,
                                          auto_world_boss=False, auto_team_dungeon=False,
@@ -1043,7 +1090,6 @@ def start_event_json(event_key="npc_40"):
             st["event_battle_done"].clear()
             for _, c in live:
                 c._daily_hold = False
-                c._ui_auto_battle = True
                 c._ui_mode_restart = True
         label = ev.get("label") or event_key
         return json.dumps({"ok": True, "message": "Đang chuyển cả team sang event %s (bỏ qua khung giờ)…" % label}, ensure_ascii=False)
@@ -1086,10 +1132,8 @@ def auto_battle_team_json(map_id=0, x=0, y=0):
             return json.dumps({"ok": True, "message":
                                "Chua chon du map/toa do farm: ca team se phu ve thanh gan leader, lap PT va dung cho tai do"},
                               ensure_ascii=False)
-        for _username, client in live:
-            client._ui_auto_battle = True
-            client.flee_mode = False
-            client.combat_ready()
+        # Nut BẮT ĐẦU FARM chỉ gom team/lập party/đi tới bãi. Nó không còn tự bật đánh;
+        # người dùng chủ động bật AUTO BATTLE ở từng tab account.
         st = runner._pstate(0)
         with st["lock"]:
             st["ui_train_target"] = (map_id, x, y)
@@ -1166,15 +1210,40 @@ def switch_best_channel_json():
 
 
 def set_train_channel_policy_json(auto_mode=False, channel=0):
-    """Chi cho phep chon kenh manual va ap dung bang flow SAFE -> tan PT -> doi -> lap PT."""
+    """Chon phan khu FARM: manual (ghim 1 khu) hoac AUTO (tu chon khu vang nhat du cho ca team).
+
+    AUTO dung cung flow SAFE -> tan PT -> doi khu -> lap lai PT nhu manual. `_dieu_phoi_chot_kenh`
+    giu lua chon on dinh (khong nhay khu lien tuc) va `_do_manual_route` cung chon khu vang khi bat
+    dau lenh farm.
+    """
     try:
+        from train_bot import config
         runner = _get_runner()
         st = runner._pstate(0)
-        auto_mode, channel = False, int(channel or 0)
+        auto_mode = bool(auto_mode)
+        channel = int(channel or 0)
+        if auto_mode:
+            # CHI LUU THIET LAP - KHONG doi khu ngay tai cho dang dung. Viec chon khu vang duoc lam
+            # khi party DA TOI BAI TRAIN (xem `_dieu_phoi_chot_kenh`). User chot 21/09: "tick vao thi
+            # toi bai train roi moi check, khong phai bam cai la doi khu luon nhu nut bam".
+            with st["lock"]:
+                st["train_channel_auto"] = True
+                st["train_channel_manual"] = 0
+                st["kenh_ghim"] = 0
+                st["kenh_dich"] = None
+                st["kenh_dich_luc"] = 0.0
+                st["auto_channel_map"] = None
+                st["auto_channel_pick"] = 0
+            log.info(">>> PHAN KHU: BAT tu chon phan khu vang (se chon khi DA TOI BAI TRAIN)")
+            return json.dumps({"ok": True, "channel": 0, "message":
+                               "Đã BẬT tự chọn phân khu vắng. Bot sẽ tự chọn khu ít người nhất đủ chỗ cho cả team KHI ĐÃ TỚI BÃI TRAIN (không đổi khu ngay tại chỗ đang đứng)"},
+                              ensure_ascii=False)
         if channel < 1:
             raise ValueError("Chua chon phan khu")
         with st["lock"]:
             st["train_channel_auto"] = False
+            st["auto_channel_map"] = None
+            st["auto_channel_pick"] = 0
             st["train_channel_manual"] = channel
             st["kenh_ghim"] = channel
             st["kenh_dich"] = channel
@@ -1379,8 +1448,57 @@ def status_json():
         return json.dumps({"ok": False, "accounts": [], "error": "%s: %s" % (type(exc).__name__, exc)}, ensure_ascii=False)
 
 
-def map_snapshot_json(username=""):
-    """Snapshot read-only cho tab ban do: team, entity live, safe va dich train."""
+def party_stats_json():
+    """AGI + cap cua tung account trong party, SAP THEO AGI GIAM DAN (thu tu combo) + cap TB team.
+
+    Chi doc du lieu live (khong gui lenh game). Dung cho nut 'AGI & CAP TEAM' o tab Dieu Khien.
+    """
+    try:
+        runner = _get_runner()
+        report = runner.party_agi_report(0)
+        configured = runner.party_accounts(0)
+        leader_user = next((u for u, _p, lead, _pk in configured if lead), "")
+        try:
+            avg_level = runner._party_average_level(0)
+        except Exception:
+            avg_level = None
+        members = []
+        for row in (report.get("rows") or []):
+            username = row.get("username")
+            status = runner.account_status(username)
+            members.append({
+                "user": username,
+                "name": row.get("char") or status.get("char") or username,
+                "level": status.get("char_level"),
+                "agi": row.get("char_agi"),
+                "pet": row.get("pet") or "",
+                "pet_level": status.get("pet_level"),
+                "pet_agi": row.get("pet_agi"),
+                "pet_faith": row.get("pet_faith"),
+                "online": bool(status.get("running")),
+                "leader": username == leader_user,
+                "strategist": bool(status.get("strategist")),
+            })
+        # AGI cao truoc (thu tu combo); thieu AGI xuong cuoi.
+        members.sort(key=lambda r: (r["agi"] is None, -(r["agi"] or 0)))
+        return json.dumps({"ok": True, "avg_level": avg_level,
+                           "agi_min": report.get("min"), "agi_max": report.get("max"),
+                           "agi_spread": report.get("spread"),
+                           "warning": bool(report.get("warning")),
+                           "canh_bao": bool(report.get("canh_bao")),
+                           "faith_thap": list(report.get("faith_thap") or []),
+                           "members": members}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "members": [],
+                           "message": "%s: %s" % (type(exc).__name__, exc)}, ensure_ascii=False)
+
+
+def map_snapshot_json(username="", with_collision=True):
+    """Snapshot read-only cho tab ban do: team, entity live, safe va dich train.
+
+    `with_collision=False`: UI da co luoi va cham cua map nay roi -> khong kem lai chuoi base64
+    nang (xem `_ground_ui_last_collision_map`). Du lieu van la CHI DOC de ve UI.
+    """
     try:
         runner = _get_runner()
         live = _live_party(runner)
@@ -1493,7 +1611,7 @@ def accounts_dashboard_json():
         st = runner._pstate(0)
         with st["lock"]:
             train_target = st.get("ui_train_target")
-            channel_auto = False
+            channel_auto = bool(st.get("train_channel_auto"))
             channel_manual = st.get("train_channel_manual")
         configured = runner.party_accounts(0)
         leader_user = next((u for u, _p, is_leader, _pet in configured if is_leader), "")
@@ -1589,6 +1707,8 @@ def accounts_dashboard_json():
                 "online": online,
                 "logging_in": bool(thread and thread.is_alive() and not online),
                 "leader": bool(is_leader),
+                "auto_battle_enabled": bool(getattr(client, "_auto_battle_enabled", False)),
+                "auto_pursuit_enabled": bool(getattr(client, "_auto_pursuit_enabled", False)),
                 "map": map_id,
                 "map_name": config.map_display_name(map_id),
                 "area_name": area_name,

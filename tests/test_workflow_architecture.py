@@ -34,6 +34,68 @@ def bounded(fn):
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_city_gather_pauses_machinebox_and_keeps_flee_until_teleport(self):
+        """A farm account must not re-aggro between battle end and the city teleport."""
+        from train_bot.workflows import common
+
+        sent = []
+        client = SimpleNamespace(
+            party_members=[], party_leader=None, self_entity=b"self", flee_mode=False,
+            stop_run_around=Mock(), set_party_invite_ready=Mock(),
+            send=lambda opcode, payload: sent.append((opcode, payload)),
+            in_combat=lambda idle_secs=2.0: False, in_di_gioi=lambda: False,
+        )
+
+        def wait_clear(**_kwargs):
+            self.assertTrue(client.flee_mode)
+
+        client._wait_combat_clear = wait_clear
+        common._workflow_leave_current_area(
+            client, lambda: False, services=SimpleNamespace(time=time))
+
+        self.assertEqual(sent, [(0x41, b"\x02\x00")])
+        self.assertTrue(client.flee_mode)
+        self.assertGreater(client._machinebox_pause_sent_at, 0)
+
+    def test_leader_recovery_does_not_stall_on_ghost_party_leave_ack(self):
+        """A stale server roster must not keep every member waiting forever after leader loss."""
+        from train_bot.workflows import train
+
+        st = {
+            "cmd": ("train", 0, 23803, 550, 590), "cmd_gen": 7,
+            "ui_train_target": (23803, 550, 590), "ui_leader_recover": True,
+            "ui_recovery_city_arrived": set(), "manual_train_users": ["leader", "member"],
+            "lock": threading.RLock(),
+        }
+        client = SimpleNamespace(
+            running=True, current_map=23802, party_members=[b"old"], party_leader=b"old-leader",
+            sync_machinebox_flags=lambda: None,
+            nearest_smart_city=lambda *_args, **_kwargs: {"city": 23001, "flag": 0},
+        )
+
+        def go_to_town(city, _flag, **_kwargs):
+            client.current_map = city
+
+        client.go_to_town = go_to_town
+
+        def ghost_party_leave(_client, _abort):
+            raise RuntimeError("Server chưa xác nhận rời party farm")
+
+        services = SimpleNamespace(
+            _nearest_safe=Mock(), _workflow_leave_current_area=ghost_party_leave,
+            account_clients={"leader": SimpleNamespace(running=True), "member": client},
+            config=SimpleNamespace(PARTY_LEADER_ACC={0: "leader"}),
+            party_train_map=Mock(), set_account_activity=Mock(), log=Mock())
+
+        waiting = train._android_train_recovery_tick(
+            client, st, "member", 0, lambda: False, services=services)
+
+        self.assertTrue(waiting)
+        self.assertIn("member", st["ui_recovery_city_arrived"])
+        self.assertEqual(client.current_map, 23001)
+        self.assertEqual(client.party_members, [])
+        self.assertIsNone(client.party_leader)
+
     def test_boss_executes_only_for_active_daily_session(self):
         client = Mock()
         inactive = SimpleNamespace(active=False)
@@ -153,6 +215,11 @@ class ArchitectureTests(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     self.assertTrue(all("run_party_digioi" not in a.name for a in node.names))
                 self.assertNotIsInstance(node, ast.Global)
+
+    def test_runner_resolves_train_preemption_service(self):
+        source = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn("mark_account_task_done,", source)
+        self.assertIn('"mark_account_task_done": mark_account_task_done,', source)
 
     def test_party_lock_never_wraps_dispatch_or_wait_operations(self):
         """Static tripwire for the deadlock pattern found in v127."""

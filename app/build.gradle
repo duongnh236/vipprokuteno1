@@ -11,8 +11,8 @@ android {
         applicationId 'com.fen.tsbot'
         minSdk 26
         targetSdk 35
-        versionCode 147
-        versionName 'v147'
+        versionCode 157
+        versionName 'v157'
 
         python {
             version '3.8'
@@ -22,11 +22,22 @@ android {
         }
     }
 
+    signingConfigs {
+        debug {
+            // Tuong thich updater cu tren cac ROM khong doc duoc certificate v2-only.
+            enableV1Signing true
+            enableV2Signing true
+        }
+    }
+
     buildTypes {
         release {
             // Cac APK da phat hanh truoc day dung Android Debug certificate. Giu cung key de
             // Android cho phep cap nhat de len ban cu ma khong phai go app/mat cau hinh.
             signingConfig signingConfigs.debug
+            // Ban updater cu doc chu ky APK qua PackageManager cua ROM. Mot so ROM khong tra
+            // certificate cho APK chi ky v2 va bao nham la "unsigned". Ky ca v1 + v2 de ban cu
+            // nhan dien duoc va Android hien dai van xac minh bang v2.
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
