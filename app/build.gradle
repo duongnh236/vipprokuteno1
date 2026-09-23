@@ -3,6 +3,17 @@ plugins {
     id 'com.chaquo.python'
 }
 
+// ==== VERSION ====
+// Nguon su that o `version.properties` (root). build.gradle doc gia tri -> APK mang so do;
+// task `bumpVersion` o cuoi file tu +1 sau moi lan build assemble -> lan build sau dung so tiep.
+def versionFile = rootProject.file("version.properties")
+def versionProps = new Properties()
+if (versionFile.exists()) {
+    versionFile.withInputStream { versionProps.load(it) }
+}
+def appVersionCode = (versionProps.getProperty("VERSION_CODE", "1").trim()).toInteger()
+def appVersionName = "v" + appVersionCode
+
 android {
     namespace 'com.fen.tsbot'
     compileSdk 35
@@ -11,8 +22,8 @@ android {
         applicationId 'com.fen.tsbot'
         minSdk 26
         targetSdk 35
-        versionCode 157
-        versionName 'v157'
+        versionCode appVersionCode
+        versionName appVersionName
 
         python {
             version '3.8'
@@ -46,4 +57,36 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+    buildFeatures {
+        // Splash dung BuildConfig.VERSION_NAME de hien so phien ban (auto-bump moi build).
+        buildConfig true
+    }
 }
+
+// Ten file APK xuat ra: aTSBot-Android-v<version>-<buildType>.apk (KHONG chua chu "unsigned" nen
+// updater GitHub khong bo qua nham).
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.outputs.each { output ->
+            output.outputFileName.set("aTSBot-Android-${appVersionName}-${variant.buildType}.apk")
+        }
+    }
+}
+
+// Tu +1 versionCode sau moi lan build assemble (APK cua lan build nay van mang so CU, file
+// version.properties ghi so cho lan sau). Sua tay version.properties khi muon moc lai.
+tasks.register("bumpVersion") {
+    group = "versioning"
+    description = "Tang VERSION_CODE trong version.properties len 1."
+    doLast {
+        def props = new Properties()
+        if (versionFile.exists()) versionFile.withInputStream { props.load(it) }
+        int next = (props.getProperty("VERSION_CODE", "1").trim()).toInteger() + 1
+        props.setProperty("VERSION_CODE", Integer.toString(next))
+        versionFile.withWriter { props.store(it, "Auto-bumped by bumpVersion. versionCode cua ban build KE TIEP.") }
+        println ">> bumpVersion: lan build ke tiep se la v${next}"
+    }
+}
+tasks.matching { it.name == "assembleDebug" || it.name == "assembleRelease" }
+     .configureEach { dependsOn "bumpVersion" }
+
