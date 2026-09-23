@@ -212,6 +212,10 @@ DISCONNECT_RECONNECTABLE = frozenset((42, 47))  # loi phien tam thoi: relogin, k
 # Cho them toi da bao lau cho moc KET TRAN THAT (`0x14 sub0700`) truoc khi cho caller di chuyen.
 # Xem `_wait_combat_clear`: di khi server con dang giai tran = `di chuyen QUA XA (ma 14)`.
 WAIT_END_THAT_SEC = 8.0
+# Khoang cach TOI DA cho MOT lenh move 0x06 (px). Gui 1 lenh xa hon nguong nay -> server tra
+# `S:000-000` ma 14 `<移動距離過遠>` -> DUT KET NOI (leader rot giua duong ra bai, ca party tan).
+# MOI duong gui move deu phai chia nho theo nguong nay (xem `_move_chia_doan`).
+MOVE_XA_TOI_DA = 120
 
 # 4 map PHO BAN TO DOI (instance). Da kiem chung deu co trong Ground.mmg (xem _td_walk).
 # Dung de biet acc DANG O TRONG pho ban: trong do khong teleport/ve thanh duoc, va "ca party
@@ -581,9 +585,19 @@ def execute_smart_route(client, route, abort=None, flee=True):
             # chi con de bao _enter_gate biet minh DANG tren thuyen (anh huong chuoi goi qua cong),
             # KHONG dung de tim duong nua.
             sailing = needs_boat and first_sea <= _i <= last_sea
-            client.navigate_to(*leg["gate_center"], abort=abort, flee=flee)
+            _nav_ok = client.navigate_to(*leg["gate_center"], abort=abort, flee=flee)
             if not client.running or (abort and abort()):
                 client._smart_route_failure = "aborted"
+                return False
+            if not _nav_ok:
+                # CHUA toi duoc cong -> TUYET DOI khong goi `_enter_gate`: no se tu `move_to`
+                # MOT lenh toi cong tu pos hien tai -> neu xa hon MOVE_XA_TOI_DA thi server tra
+                # ma 14 -> DUT KET NOI (leader rot giua duong ra bai). Dinh tran giua duong la
+                # nguyen nhan thuong gap -> tra loi de caller retry/plan lai tu map hien tai.
+                log.warning("[%s] scene route: chua toi duoc cong idx=%s @%s tren map %s -> KHONG "
+                            "transit (tranh ma 14 khi move 1 lenh toi cong)", client._label,
+                            leg["gate"], tuple(leg["gate_center"]), client.current_map)
+                client._smart_route_failure = "gate_unreachable"
                 return False
             # _in_scene_gate: trong luc qua cong, moi acc danh tran phuc kich RIENG -> in_combat()
             # KHONG duoc ha in_battle theo member-confirm (member khac xong tran cong khac -> ha oan
@@ -15903,7 +15917,7 @@ class GameClient:
     #
     # 120 lay theo thang do DA CHAY DUOC cua smart path: log 10/09 chia doan (150,3630)->(1210,3590)
     # (1060 don vi) thanh 11 move-point ~96/buoc, va duong do khong dinh ma 14 lan nao.
-    ROUTE_BUOC_TOI_DA = 120
+    ROUTE_BUOC_TOI_DA = MOVE_XA_TOI_DA   # alias; nguong that o module-level `MOVE_XA_TOI_DA`
 
     def _route_move(self, x: int, y: int, settle: float = 0.6, tries: int = 8):
         """Di 1 buoc route AN TOAN: cho het tran -> move -> neu vua move lai dinh tran
@@ -15943,11 +15957,11 @@ class GameClient:
             _cach = math.hypot(x - _tu[0], y - _tu[1]) if _tu else 0.0
         except Exception:
             _tu, _cach = None, 0.0
-        if not _tu or _cach <= self.ROUTE_BUOC_TOI_DA:
+        if not _tu or _cach <= MOVE_XA_TOI_DA:
             self.move_to(x, y)
             time.sleep(settle)
             return True
-        _so = int(_cach / self.ROUTE_BUOC_TOI_DA) + 1
+        _so = int(_cach / MOVE_XA_TOI_DA) + 1
         log.info("[%s] route: %s -> (%d,%d) cach %.0f -> chia %d buoc (tranh ma 14)",
                  self._label, _tu, x, y, _cach, _so)
         for _i in range(1, _so + 1):
@@ -16076,7 +16090,14 @@ class GameClient:
             if not self._wait_combat_clear(idle=5.0):
                 return False
             if x or y:   # x=y=0 -> cong "vao lien" (spawn ngay tai cong) -> KHONG move, chi trigger
-                self.move_to(x, y)
+                # CHIA DOAN toi cong thay vi gui MOT lenh move: cong o xa (vd dist=1800) ma ban
+                # thang 1 lenh -> `S:000-000` ma 14 `<移動距離過遠>` -> DUT KET NOI -> leader rot
+                # giua duong ra bai, ca party tan (log 22/09 16:39:13). Dinh tran giua duong thi
+                # `_move_chia_doan` tra False -> cho het tran roi lam lai ca lan thu.
+                if not self._move_chia_doan(x, y):
+                    if not self.running:
+                        return False
+                    continue
             # Dung tai cong: cho 0x35/0x34 (battle) kip den neu BUOC MOVE TOI CONG vua AGGRO quai moi.
             # 3.0s (KHONG 1.5s): aggro tu buoc move gui 0x34/0x35 ve cham ~1s -> 1.5s check som -> tuong
             # het tran -> transit -> tran moi ve giua transit -> SERVER KICK leader (race da gap o bai quai).

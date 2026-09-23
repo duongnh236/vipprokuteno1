@@ -137,7 +137,8 @@ python3 -B -m unittest discover -s tests -q -p 'test_android_safety.py'
 
 Test liên quan: `test_dg_pursuit_requires_ground_and_generation`,
 `test_pursuit_is_movement_only_and_stops_when_workflow_blocks_it`,
-`test_navigation_never_counts_a_move_rejected_by_combat` (hiện **đang đỏ — WIP có sẵn**, chờ
-`MOVE_XA_TOI_DA` / `self._move_chia_doan(x, y)`; không liên quan thay đổi mới).
+`test_navigation_never_counts_a_move_rejected_by_combat` (chặn mã 14: không gửi 1 lệnh move xa hơn
+`MOVE_XA_TOI_DA`; `_enter_gate` chia đoạn; `execute_smart_route` không gọi `_enter_gate` khi
+`navigate_to` fail).
 
 Chi tiết route xuyên map (legs, thuyền, replan): `references/cross-map.md`.
