@@ -2429,6 +2429,10 @@ class GameClient:
         # combat turn handling
         self.available = {}          # unit -> list (atype, target)
         self._acted_turn = False
+        # Worker ra quyet dinh phai GAN BAT BIEN vao dung (generation, turn). Neu worker cua
+        # luot cu chay cham ma doc tracker/available song, no co the gui mot unit sang luot moi
+        # roi clear option cua luot moi (DG solo tung mat pet atype=0 o cac luot chan).
+        self._acted_turn_key = None
         # Worker hen gio cho vong ra quyet dinh (thay threading.Timer): 1 thread/phien thay vi
         # 1 thread moi lan hen. `_decision_handle` = hen dang cho cua buoc ra quyet dinh (de huy).
         self._turn_worker = _DeferredWorker(name="turn-%s" % (user_id or "acc"))
@@ -2509,7 +2513,12 @@ class GameClient:
         self._auto_battle_enabled = False
         self._auto_pursuit_enabled = False
         self.dungeon_complete = False  # True khi nhan goi hoan thanh dungeon (S2C 0x14 sub 0x64)
-        self._machinebox_map_cam = set()   # map bi server DUNG hop may (S:065-002) = map CAM
+        # Chi ghi map cam khi server TU CHOI NGAY sau chinh lenh re-arm. Mot goi S:065-002 don le
+        # co the chi la hop may het phien/tam dung, KHONG du de ket luan map cam (23803 da danh
+        # nhieu tran van tung bi gan nham -> dung 75s giua hai tran).
+        self._machinebox_map_cam = set()
+        self._machinebox_rearm_map = None
+        self._machinebox_rearm_pending_map = None
         self._machinebox_force_paused = False  # flow chu dong tat de ve thanh/tap ket
         self._machinebox_server_paused = False # da nhan ACK S:065-002 cua lenh pause gan nhat
         self._doi_kenh_tu = 0.0            # luc bat dau doi kenh (roster cua ca party dang bien dong)
@@ -2973,6 +2982,71 @@ class GameClient:
                  self._label, "VAO" if self.in_pb_quest_event() else "RA KHOI",
                  bool(pl[6]), bool(pl[7]))
         return True
+
+    def _handle_machinebox_paused(self):
+        """Xu ly S:065-002 ma khong gan nham map train thanh map cam Hop May.
+
+        Server co the pause Hop May sau mot thoi gian farm. Chi coi map TU CHOI khi pause quay lai
+        trong 10 giay sau chinh lenh bat lai cua bot tren cung map. Workflow chu dong pause, map
+        quest/PB va account tat AUTO BATTLE tuyet doi khong duoc re-arm.
+        """
+        self._machinebox_server_paused = True
+        if getattr(self, "_machinebox_force_paused", False):
+            log.info("[%s] HOP MAY: server da ACK tam dung cho flow ve thanh -> giu TAT",
+                     self._label)
+            return False
+        now = time.time()
+        if now - float(getattr(self, "_machinebox_pause_sent_at", 0.0) or 0.0) < 10.0:
+            return False
+        map_id = int(getattr(self, "current_map", 0) or 0)
+        if bool(getattr(getattr(self, "state", None), "in_battle", False)):
+            # 0x41 chen vao giua battle lam server xu ly luot cham/leth phien. S:065-002 thuong
+            # den dung luc server vao tran, nen chi ghi pending; END that se re-arm mot lan.
+            if self._machinebox_rearm_pending_map != map_id:
+                log.info("[%s] HOP MAY pause trong tran map %s -> de re-arm sau END",
+                         self._label, map_id)
+            self._machinebox_rearm_pending_map = map_id
+            return False
+        if (not bool(getattr(self, "_auto_battle_enabled", False))
+                or self.in_pb_quest_event()):
+            log.info("[%s] HOP MAY dung o map %s nhung AUTO BATTLE tat/pha PB-event -> giu TAT",
+                     self._label, map_id)
+            return False
+        last = float(getattr(self, "_machinebox_rearm_at", 0.0) or 0.0)
+        last_map = getattr(self, "_machinebox_rearm_map", None)
+        if map_id and last_map == map_id and 0.0 <= now - last < 10.0:
+            self._machinebox_map_cam.add(map_id)
+            log.warning("[%s] map %s TU CHOI Hop May ngay sau re-arm -> danh dau cam trong "
+                        "phien nay, khong gui lai", self._label, map_id)
+            return False
+        if map_id and map_id in self._machinebox_map_cam:
+            log.info("[%s] map %s da xac nhan tu choi Hop May trong phien nay -> khong bat lai",
+                     self._label, map_id)
+            return False
+        log.warning("[%s] HOP MAY bi server DUNG o map train %s -> re-arm mot lan",
+                    self._label, map_id)
+        self._machinebox_rearm_at = now
+        self._machinebox_rearm_map = map_id
+        try:
+            self.send(0x41, b"\x01\x00" + self.machinebox_payload())
+        except OSError:
+            return False
+        self._machinebox_server_paused = False
+        log.info("[%s] HOP MAY: da bat lai o map train %s", self._label, map_id)
+        return True
+
+    def _resume_machinebox_after_battle(self):
+        """Xu ly re-arm da hoan; chi goi sau khi state.in_battle da ha boi END that."""
+        pending = getattr(self, "_machinebox_rearm_pending_map", None)
+        if pending is None:
+            return False
+        self._machinebox_rearm_pending_map = None
+        if int(getattr(self, "current_map", 0) or 0) != int(pending):
+            return False
+        # Pause nay xay ra TRONG TRAN, khong phai server tu choi lenh re-arm truoc do.
+        self._machinebox_rearm_at = 0.0
+        self._machinebox_rearm_map = None
+        return self._handle_machinebox_paused()
 
     def _login_setup(self):
         """Chuoi C2S client THAT gui NGAY sau auth (capture login.pcap). Thieu chuoi nay ->
@@ -4184,6 +4258,20 @@ class GameClient:
             self._metrics_battle_pet_exp = 0
             self._metrics_battle_char_exp_start = self.char_exp
 
+    def _exp_row_standalone(self):
+        """True khi dong EXP tu packet nen hien RIENG trong nhat ky.
+
+        EXP trong tran (hoac packet toi tre ngay sau tran <=5s) da duoc GOP vao
+        dong `battle_summary`/`battle_exp` luc ket tran (`_metrics_battle_end`).
+        Neu van ghi them dong `exp` tho thi UI hien cung gia tri 2 lan. Dong tho
+        luon duoc giu trong `combat_exp_log` de doi chieu protocol.
+        """
+        if self._metrics_battle_started_at is not None:
+            return False
+        if self._metrics_battle_end_at > 0 and time.time() - self._metrics_battle_end_at <= 5.0:
+            return False
+        return True
+
     def _metrics_exp_gain(self, who, amount):
         amount = max(0, int(amount or 0))
         if not amount:
@@ -4246,7 +4334,8 @@ class GameClient:
                     "who": "character", "kind": 1, "exp": _fallback_gain,
                     "source": "character total at battle end"}
             self.combat_exp_log.appendleft(dict(_row))
-            self.activity_log.appendleft(dict(_row))
+            # Khong ghi vao activity_log: gia tri nay se nam trong dong battle_exp
+            # tao ngay ben duoi -> tranh hien trung.
         self.last_battle_seconds = max(0.1, time.time() - started)
         self.last_battle_char_exp = int(self._metrics_battle_char_exp)
         self.last_battle_pet_exp = int(self._metrics_battle_pet_exp)
@@ -4414,7 +4503,8 @@ class GameClient:
                         "kind": int(_exp_kind), "exp": int(_exp),
                         "pet": str(getattr(self, "pet_name", "") or "")}
                 self.combat_exp_log.appendleft(dict(_row))
-                self.activity_log.appendleft(dict(_row))
+                if self._exp_row_standalone():
+                    self.activity_log.appendleft(dict(_row))
                 if _who != "unknown":
                     self._metrics_exp_gain(_who, _exp)
                 log.info("[%s] KET TRAN EXP: kind=%d who=%s +%d", self._label,
@@ -4438,6 +4528,7 @@ class GameClient:
             self._metrics_battle_end()
             self._heal_after_battle()   # hoi HP/SP NGAY khi ket tran (khong doi tick keepalive)
             self._flush_bag_queue()     # lenh tui do user bam giua tran -> gui bay gio
+            self._resume_machinebox_after_battle()
         # KET TRAN khi BO CHAY: flee KHONG sinh 0x14 sub0700 (man THANG) ma chuoi 0x14 0c00 -> 0900 ->
         # 0800 (xac nhan capture flee.pcap). -> cung ha in_battle de go_to_town teleport duoc sau flee.
         # (Neu flee chua thanh cong/dang giua tran, luot 0x35 sau tu set lai in_battle=True.)
@@ -4615,7 +4706,8 @@ class GameClient:
                             "who": "character", "kind": 1, "exp": int(_gain),
                             "total": int(_new_exp), "source": "0x08/01 attr36"}
                     self.combat_exp_log.appendleft(dict(_row))
-                    self.activity_log.appendleft(dict(_row))
+                    if self._exp_row_standalone():
+                        self.activity_log.appendleft(dict(_row))
                     self._metrics_exp_gain("character", _gain)
                     log.info("[%s] EXP NHAN VAT: +%d (tong=%d, S:008 attr36 sub=%s)",
                              self._label, _gain, _new_exp, pkt[7:9].hex())
@@ -4650,7 +4742,8 @@ class GameClient:
                         "total": int(_new_pet_exp), "pet": _pet_label,
                         "pet_id": int(_pet_index), "source": "0x08/02 attr36"}
                 self.combat_exp_log.appendleft(dict(_row))
-                self.activity_log.appendleft(dict(_row))
+                if self._exp_row_standalone():
+                    self.activity_log.appendleft(dict(_row))
                 self._metrics_exp_gain("pet", _gain)
                 log.info("[%s] EXP PET %s: +%d (tong=%d, S:008-002 attr=36)",
                          self._label, _pet_label or _pet_index, _gain, _new_pet_exp)
@@ -4800,49 +4893,7 @@ class GameClient:
         # start, KHONG ca _login_setup vi trong do co 0x7c/0x62 gay side-effect). Cach nhau it
         # nhat 30s de neu server co ly do dung that thi khong thanh vong gui lien tuc.
         elif opcode == 0x41 and len(pkt) >= 9 and pkt[7:9] == b"\x02\x00":
-            self._machinebox_server_paused = True
-            # ACK cua CHINH MINH: _login_setup co chu y gui 0x41 0200 roi moi BAT lai o cuoi chuoi.
-            # Khong loc thi bot tu chen goi bat-lai vao GIUA chuoi login (xem ghi chu o _login_setup)
-            # -> vua thua, vua co nguy co lam hong trinh tu dang nhap.
-            if getattr(self, "_machinebox_force_paused", False):
-                log.info("[%s] HOP MAY: server da ACK tam dung cho flow ve thanh -> giu TAT",
-                         self._label)
-                return
-            if time.time() - float(getattr(self, "_machinebox_pause_sent_at", 0.0) or 0.0) < 10.0:
-                return
-            _last = getattr(self, "_machinebox_rearm_at", 0.0)
-            _map = int(getattr(self, "current_map", 0) or 0)
-            log.warning("[%s] HOP MAY bi server DUNG (S:065-002) o map %s -> quai se khong "
-                        "vao tran", self._label, _map)
-            # MAP CAM HOP MAY thi KHONG duoc bat lai. Client that kiem TRUOC khi bat
-            # (`_lua_dec/Logic/MachineBox.lua:360`, `SetAutoFight`):
-            #     if SceneManager.CheckLimit(SceneManager.sceneId, ESceneLimit.NoMachinebox)
-            #       then ShowCenterMessage(...); return;    -- KHONG gui goi
-            # (`ESceneLimit.NoMachinebox = 13`, bit trong `sceneDatas[sceneId].limits`.) Va
-            # client KHONG BAO GIO tu bat lai khi nhan `S:065-002` - no chi SetAutoFight(false).
-            #
-            # Bot khong co bang `limits`, nhung chinh `S:065-002` LA cau tra loi cua server:
-            # map nay cam. Bat lai o do la cai server, va cai gia la DUT KET NOI:
-            #   07/09 party 1 (40NPC, map 10991) - user: "bat dau tran thi leader dis luon":
-            #     21:06:53 HOP MAY bi server DUNG (S:065-002) -> da bat lai hop may
-            #     21:06:57 <<nhan 0x34            (vao tran)
-            #     21:06:57 <<nhan 0x14 08 00 03   S:020-008 <事件結束>
-            #     21:06:57 SERVER NGAT KET NOI: ma la 47  (戰鬥未結束事件先結束)
-            #   `gamo` dinh y het 32 giay sau. Bang "goi gan nhat truoc khi rot" khong co goi
-            #   GUI nao - thu phat la lenh bat-lai tu 4 giay truoc do.
-            if _map and _map in self._machinebox_map_cam:
-                log.info("[%s] map %s DA TUNG cam hop may -> KHONG bat lai (client that "
-                         "cung khong bat)", self._label, _map)
-                return
-            if _map:
-                self._machinebox_map_cam.add(_map)
-            if time.time() - _last >= 30.0:
-                self._machinebox_rearm_at = time.time()
-                try:
-                    self.send(0x41, b"\x01\x00" + self.machinebox_payload())
-                    log.info("[%s] -> da bat lai hop may (lan dau o map %s)", self._label, _map)
-                except OSError:
-                    pass
+            self._handle_machinebox_paused()
         # S:000-000 <斷線> +斷線原因(1): server BAO TRUOC ly do roi moi dong ket noi.
         # Layout (xac nhan tu dump that): [header 7B][sub 2B = 00 00][cause 1B][...]
         #   ...00 00 5a...  -> 5a = 90 = dang nhap qua thuong xuyen   (1232/1574 lan trong 1 phien)
@@ -5807,7 +5858,8 @@ class GameClient:
                         "who": "character", "kind": 1, "exp": int(_gain),
                         "total": int(self.char_exp), "source": "0x05/03 character refresh"}
                 self.combat_exp_log.appendleft(dict(_row))
-                self.activity_log.appendleft(dict(_row))
+                if self._exp_row_standalone():
+                    self.activity_log.appendleft(dict(_row))
                 self._metrics_exp_gain("character", _gain)
                 log.info("[%s] EXP NHAN VAT: +%d (full character refresh)", self._label, _gain)
             # Dong bo baseline tong de packet attr36 den sau snapshot khong cong trung cung delta.
@@ -6322,6 +6374,7 @@ class GameClient:
         # 0x35 available-actions = toi luot minh -> dang trong tran
         self.state.in_battle = True
         self.last_turn_time = time.time()
+        self._turn_started_at = time.time()   # moc dau luot (duong legacy) de do do tre gui lenh
         for unit, atype, target in offers:
             self.available.setdefault(unit, [])
             if (atype, target) not in self.available[unit]:
@@ -6451,6 +6504,14 @@ class GameClient:
                 self._metrics_battle_start()
             elif event.kind == "turn_start":
                 self._metrics_battle_start()
+                # Moc DAU LUOT (0x34 turn_start) - de `_send_combat` do do tre tu dau luot den
+                # luc gui lenh danh (xem log `BATTLE SEND ... +Xs`).
+                self._turn_started_at = time.time()
+                # Coordinator chi log ban sao DAU cua party, nen dong `P1 TURN START` co the la
+                # packet cua member khac. Ghi moc LOCAL/account de phan biet server giao luot tre
+                # voi bot xu ly tre; doi chieu truc tiep cung `BATTLE SEND [MEMBER]`.
+                log.info("[%s] BATTLE TURN LOCAL g=%d t=%d", self._label,
+                         event.generation, event.turn)
                 self._prepare_tracker_turn()
                 # train_block_stats: battle tracker MOI thay nhanh 0x33 legacy -> ghi so block quai
                 # o day, 1 lan/tran (theo generation). Truoc day _record_train_block_stats CHI goi o
@@ -6465,6 +6526,18 @@ class GameClient:
                         "[%s] BATTLE ACK g=%d t=%d source=%s",
                         self._label, event.generation, event.turn, event.source,
                     )
+            elif event.kind == "status":
+                # FALLBACK (khong phai duong chinh): 0x35 bao "toi luot" (record skill_id=0 o hang
+                # char/pet) - giong tin hieu legacy `_on_actions`. CHI arm khi `turn_start` (0x34)
+                # CHUA dung duoc option (`available` rong, vd 0x34 toi truoc khi tracker co du don
+                # vi). KHONG arm lai moi goi 0x35: `_arm_decision` huy+re-lich moi lan -> lenh danh
+                # bi DEBOUNCE cho het burst 0x35 cua ca party -> GUI CHAM.
+                if (self.auto_combat and not getattr(self, "_acted_turn", False)
+                        and not self.available
+                        and getattr(event, "skill_id", None) == 0
+                        and getattr(event, "position", None)
+                        and event.position[0] in (config.UNIT_CHAR, config.UNIT_PET)):
+                    self._prepare_tracker_turn()
             elif event.kind == "end":
                 self._metrics_battle_end()
                 self.available = {}
@@ -6479,6 +6552,7 @@ class GameClient:
                 self.state.reset_enemies(reset_quest=not in_team_dungeon)
                 self.state.in_battle = False
                 self._heal_after_battle()
+                self._resume_machinebox_after_battle()
         return tuple(zip(events, accepted))
 
     def _prepare_tracker_turn(self):
@@ -6491,13 +6565,36 @@ class GameClient:
             if row in self.state.enemy_rows and unit.alive and unit.hp > 0
         })
         atype = self.state.my_atype
+        solo_multipet = bool(getattr(self.state, "solo_multipet", False))
         self.available = {}
         for unit_kind in (config.UNIT_CHAR, config.UNIT_PET):
-            unit = tracker.units.get((unit_kind, atype))
-            if unit is not None and unit.alive:
-                self.available[unit_kind] = [(atype, target) for target in targets]
+            if unit_kind == config.UNIT_PET and solo_multipet:
+                # DI GIOI SOLO: 4 pet CUNG luot, moi con 1 atype rieng (0,1,3,4) - KHONG duoc loc
+                # theo `my_atype` (do la atype cua CHAR=2, khong lien quan pet). Giong duong legacy
+                # `_on_actions`: gom TAT CA pet co trong tracker. Thieu nhanh nay -> `_make_decisions`
+                # chi thay 1 pet (hoac 0) -> PET KHONG RA LENH -> tran ket ("dang cho lenh danh tu
+                # pet"). Day la ly do "vao tran khong danh" khi bat AUTO BATTLE o DG solo.
+                for (row, col), unit in tracker.units.items():
+                    if row != config.UNIT_PET or not unit.alive:
+                        continue
+                    self.available.setdefault(config.UNIT_PET, []).extend(
+                        (col, target) for target in targets)
+            else:
+                unit = tracker.units.get((unit_kind, atype))
+                if unit is not None and unit.alive:
+                    self.available[unit_kind] = [(atype, target) for target in targets]
         self.last_turn_time = time.time()
         self._acted_turn = False
+        self._acted_turn_key = None
+        if self.auto_combat and not self.available:
+            # AUTO BATTLE dang BAT nhung KHONG co option nao de ra lenh -> bot se DUNG IM.
+            # Ghi RO vi sao (targets rong? unit cua minh chua co trong tracker? my_atype sai?)
+            # de khong phai doan khi user bao "vao tran khong danh".
+            log.info("[%s] BATTLE g=%d t=%d: KHONG co option (targets=%d, my_atype=%s, "
+                     "char_unit=%s, pet_unit=%s, enemy_rows=%s) -> khong ra lenh danh",
+                     self._label, tracker.generation, tracker.turn, len(targets), atype,
+                     (config.UNIT_CHAR, atype) in tracker.units,
+                     (config.UNIT_PET, atype) in tracker.units, tuple(self.state.enemy_rows))
         if self.auto_combat and self.available:
             self._arm_decision()
 
@@ -6528,35 +6625,63 @@ class GameClient:
             worker.cancel(handle)
         self._decision_handle = None
 
-    def _schedule_decision(self, delay):
+    def _schedule_decision(self, delay, expected_key=None, available_snapshot=None):
         """Hen buoc ra quyet dinh sau `delay` giay (thay threading.Timer)."""
         worker = getattr(self, "_turn_worker", None)
         if worker is not None:
-            self._decision_handle = worker.schedule(delay, self._make_decisions)
+            self._decision_handle = worker.schedule(
+                delay,
+                lambda: self._make_decisions(expected_key, available_snapshot),
+            )
 
-    def _schedule_reset(self, delay):
+    def _schedule_reset(self, delay, expected_key=None):
         """Hen `_reset_turn` sau `delay` giay. Nhieu hen doc lap (giong Timer cu)."""
         worker = getattr(self, "_turn_worker", None)
         if worker is not None:
-            worker.schedule(delay, self._reset_turn)
+            worker.schedule(delay, lambda: self._reset_turn(expected_key))
+
+    def _combat_turn_key(self):
+        tracker = getattr(self, "battle_tracker", None)
+        return (int(getattr(tracker, "generation", 0) or 0),
+                int(getattr(tracker, "turn", 0) or 0))
+
+    def _is_current_combat_turn(self, expected_key):
+        return expected_key is None or expected_key == self._combat_turn_key()
 
     def _arm_decision(self):
         self._cancel_decision()
+        # Moc "ARM DAU TIEN cua luot nay" - de `_send_combat` do duoc do tre (debounce cho het
+        # burst 0x35 + thoi gian tinh toan). `_arm_decision` bi goi lai moi goi luot -> huy+re-lich,
+        # nen moc chi lay lan dau.
+        _tr = getattr(self, "battle_tracker", None)
+        _key = (getattr(_tr, "generation", 0), getattr(_tr, "turn", 0))
+        if getattr(self, "_arm_key", None) != _key:
+            self._arm_key = _key
+            self._arm_first_at = time.time()
         # Khong chen delay nhan tao. Delay 0 van tach khoi receive thread (worker rieng), nen parser
         # khong bi block; coordinator/generation ben `_send_combat` van chan trung va sai luot.
         if self.in_team_dungeon():
             delay = 0.0
         else:
             delay = self.submit_delay
-        self._schedule_decision(delay)
+        # Snapshot rieng: worker khong duoc doc `self.available` cua luot ke tiep.
+        _snapshot = {unit: list(options) for unit, options in self.available.items()}
+        self._schedule_decision(delay, _key if _key[0] else None, _snapshot)
 
-    def _make_decisions(self):
+    def _make_decisions(self, expected_key=None, available_snapshot=None):
         # Worker hen gio nay GUI lenh danh 0x32. Khi dang PB -> uu tien de lenh khong bi cac acc train
         # lam tre (tre -> lech phien/mat luot -> luot cham 25s). Hen ngan han nen set moi lan.
         if self.in_team_dungeon():
             _set_thread_prio(1)
-        if self._acted_turn:
+        if not self._is_current_combat_turn(expected_key):
+            log.info("[%s] bo worker combat CU expected=%s current=%s",
+                     self._label, expected_key, self._combat_turn_key())
             return
+        if (expected_key is not None and self._acted_turn_key == expected_key) or (
+                expected_key is None and self._acted_turn):
+            return
+        turn_available = (available_snapshot if available_snapshot is not None
+                          else {unit: list(options) for unit, options in self.available.items()})
         # VUA nhan goi KET TRAN THAT (grace, CUNG THE HE) -> tran DA xong: KHONG ra quyet dinh nao (ke ca
         # Hoi Sinh). Timer quyet dinh co the da ARM tu goi 0x35 luot cuoi TRUOC khi sub0800 toi, roi
         # fire SAU khi ket tran -> decide tren state tan du (quai da clear) -> cast Hoi Sinh oan
@@ -6576,12 +6701,12 @@ class GameClient:
             # thu lai chi thay 'khong con quai song' roi thoi (vo hai).
             self._gate_retry = getattr(self, "_gate_retry", 0) + 1
             if self._gate_retry <= 40:          # ~12s (0.3s/lan)
-                self._schedule_decision(0.3)
+                self._schedule_decision(0.3, expected_key, turn_available)
                 return
             log.warning("[%s] cho gate transit qua lau -> bo luot nay", self._label)
             self._gate_retry = 0
             self.available = {}
-            self._schedule_reset(1.0)
+            self._schedule_reset(1.0, expected_key)
             return
         self._gate_retry = 0
         # Neu stats chua load -> chi cho toi da 0.2s. Khong de mot packet stat cham lam ca luot
@@ -6594,12 +6719,13 @@ class GameClient:
             else:
                 log.warning("[%s] Stats chua load sau 0.2s -> bo qua luot", self._label)
                 self.available = {}
-                self._schedule_reset(1.5)
+                self._schedule_reset(1.5, expected_key)
                 return
         self._acted_turn = True
+        self._acted_turn_key = expected_key
         try:
-            char_opts = self.available.get(config.UNIT_CHAR, [])
-            pet_opts = self.available.get(config.UNIT_PET, [])
+            char_opts = turn_available.get(config.UNIT_CHAR, [])
+            pet_opts = turn_available.get(config.UNIT_PET, [])
             # CHI dieu khien pet neu 0x35 co option pet o DUNG vi tri cua minh (my_atype).
             # Pet o CUNG atype voi char (khac hang/unit). Khong co pet@my_atype = acc KHONG co pet
             # (trong tran nay) -> gui lenh pet se sai -> server da/disconnect.
@@ -6633,7 +6759,7 @@ class GameClient:
                 # KHONG dung pet_opts (da bi loc theo my_atype o tren) - vi my_atype co the
                 # SAI/CU (vd roster khong co self -> lay tu 0x0b) -> loc nham -> bo sot pet ->
                 # pet khong hanh dong -> turn khong hoan tat -> KET TRAN khong thoat duoc.
-                raw_pet = self.available.get(config.UNIT_PET, [])
+                raw_pet = turn_available.get(config.UNIT_PET, [])
                 pet_atypes = {o[0] for o in raw_pet}
                 a = None
                 if char_opts:
@@ -6642,12 +6768,14 @@ class GameClient:
                         # hang = hang CUA MINH (loan dau doi phe -> 0, khong phai 3 co dinh)
                         self._send_combat(combat.Decision(
                             config.UNIT_CHAR, a, a, config.SKILL_FLEE,
-                            b=combat._hang_cua(self.state, config.UNIT_CHAR)))
+                            b=combat._hang_cua(self.state, config.UNIT_CHAR)),
+                            expected_key=expected_key)
                 # Gui pet flee CHI khi 0x35 co option pet o DUNG slot char dang flee (a) VA pet con song.
                 if a is not None and a in pet_atypes and not pet_dead:
                     self._send_combat(combat.Decision(
                         config.UNIT_PET, a, a, config.SKILL_FLEE,
-                        b=combat._hang_cua(self.state, config.UNIT_PET)))
+                        b=combat._hang_cua(self.state, config.UNIT_PET)),
+                        expected_key=expected_key)
                 log.info("[%s] BO CHAY (flee_mode, char_at=%s pet_at=%s my_atype=%s char_opts=%s pet_opts=%s)",
                          self._label, a, (a if (a is not None and a in pet_atypes) else None),
                          my_at, sorted({o[0] for o in char_opts}), sorted(pet_atypes))
@@ -6660,7 +6788,7 @@ class GameClient:
                     # gui gi (truoc day fallback danh MU cot 1 -> goi 0x32 thua sau khi da thang tran).
                     log.info("[%s] CHAR khong con quai song -> bo qua (tran da ket)", self._label)
                 else:
-                    self._send_combat(d)
+                    self._send_combat(d, expected_key=expected_key)
                     if self._log_battle_verbose():
                         _off = sorted(t for a, t in char_opts if a == self.state.my_atype)
                         log.info("[%s] CHAR %s | %s | skills=%s | quai@%s | offer(my_at=%s)=%s | enemy_hp=%s",
@@ -6674,7 +6802,7 @@ class GameClient:
                 # DI GIOI SOLO: toi da 4 pet CUNG luot, moi con 1 atype rieng (0,1,3,4) - KHONG
                 # loc theo self.state.my_atype (do la atype cua CHAR=2, khong lien quan pet o day).
                 # Duyet TAT CA atype pet co mat trong 0x35 luot nay (raw, chua bi loc o tren).
-                raw_pet = self.available.get(config.UNIT_PET, [])
+                raw_pet = turn_available.get(config.UNIT_PET, [])
                 pet_atypes_now = sorted({o[0] for o in raw_pet})
                 for pat in pet_atypes_now:
                     opts_at = [o for o in raw_pet if o[0] == pat]
@@ -6687,7 +6815,7 @@ class GameClient:
                         self.state.multi_pet[pat] = unit
                     d = combat.decide_multipet(self.state, pat, skills_at, unit, opts_at)
                     if d is not None:
-                        self._send_combat(d)
+                        self._send_combat(d, expected_key=expected_key)
                         if self._log_battle_verbose():
                             log.info("[%s] PET(atype=%d) %s | skills=%s | %s", self._label, pat, d,
                                      [hex(s) for s in skills_at], unit)
@@ -6696,7 +6824,7 @@ class GameClient:
                 if d is None:
                     log.info("[%s] PET khong con quai song -> bo qua (tran da ket)", self._label)
                 else:
-                    self._send_combat(d)
+                    self._send_combat(d, expected_key=expected_key)
                     if self._log_battle_verbose():
                         log.info("[%s] PET  %s | %s", self._label, d, self.state.pet)
             elif pet_opts and pet_dead:
@@ -6704,13 +6832,20 @@ class GameClient:
             self._first_turn = False
         finally:
             # reset cho luot sau
-            self.available = {}
-            self._schedule_reset(1.5)
+            if self._is_current_combat_turn(expected_key):
+                self.available = {}
+            self._schedule_reset(1.5, expected_key)
 
-    def _reset_turn(self):
+    def _reset_turn(self, expected_key=None):
+        if not self._is_current_combat_turn(expected_key):
+            return
+        # Tracker co turn ro rang: giu trang thai "da danh" cho toi 0x34 cua luot MOI.
+        # Khong reset sau 1.5s, neu khong 0x35 den som cua luot ke se arm bang turn cu.
+        if expected_key is not None:
+            return
         self._acted_turn = False
 
-    def _send_combat(self, d: combat.Decision, tail: bytes = None):
+    def _send_combat(self, d: combat.Decision, tail: bytes = None, expected_key=None):
         """0x32: 01 00 [unit][atype][b11=00][target][skill LE][tail].
         tail = 2 byte nonce; client THAT gui gia tri THAY DOI MOI GOI (xac nhan capture). Truoc day
         bot gui CO DINH 0000 -> khi 2 turn LIEN TIEP CUNG skill+target (vd don 1 con "trau" nhieu
@@ -6723,6 +6858,10 @@ class GameClient:
         # the o hang 0-1: gui hang nguon 3/2 luc dang dung o hang 0 = ban ghi khong phai cua minh
         # -> server tra `S:000-000` ly do 42 `修改戰鬥封包` va DA HAN acc (su co 25/08 21:58).
         # `_hang_cua` tra dung 3/2 o mac dinh nen tran thuong khong doi mot ly nao.
+        if not self._is_current_combat_turn(expected_key):
+            log.info("[%s] bo SEND worker CU expected=%s current=%s",
+                     self._label, expected_key, self._combat_turn_key())
+            return False
         hang_nguon = combat._hang_cua(self.state, d.unit)
         source = (hang_nguon, d.atype)
         tracker = self.battle_tracker
@@ -6731,14 +6870,17 @@ class GameClient:
             _acc_id = self._battle_account_id()
             _key_ok, _turn_ok = coordinator.sent_state(_acc_id, tracker.generation, tracker.turn)
             if not (_key_ok and _turn_ok):
-                # Phien dieu phoi lech (thuong sau relogin/reform) -> VAN GUI. Truoc day chan o day
-                # = mat sach lenh danh, im lang. Log WARNING de lan sau thay ngay.
+                # Phien dieu phoi lech (thuong sau relogin/reform) -> VAN GUI, va KHONG de
+                # `mark_sent` chan nua: khi phien lech thi `(gen,turn)` co the la KEY CU, ma mot
+                # luot MOI lai trung key cu -> bi coi la "da gui dung luot nay" -> MAT LENH danh
+                # -> tran tre/ket (dung "co tran nhanh tran cham"). Truoc day van goi `mark_sent`
+                # ngay sau log "VAN GUI" - mau thuan, va chinh no am tham bo lenh.
                 log.warning(
                     "[%s] party-battle lech phien (khop_key=%s thay_turn=%s) g=%d t=%d -> VAN GUI "
-                    "lenh danh (khong bo)", self._label, _key_ok, _turn_ok,
+                    "lenh danh (khong bo, bo qua chong trung)", self._label, _key_ok, _turn_ok,
                     tracker.generation, tracker.turn,
                 )
-            if not coordinator.mark_sent(_acc_id, source, tracker.generation, tracker.turn):
+            elif not coordinator.mark_sent(_acc_id, source, tracker.generation, tracker.turn):
                 log.warning(
                     "[%s] bo SEND source=%s vi DA GUI dung luot nay roi (g=%d t=%d)",
                     self._label, source, tracker.generation, tracker.turn,
@@ -6767,11 +6909,19 @@ class GameClient:
         # 22, tran 12 phut) va hoi lai 11/09 (party 2, luot 99 giay). Ca hai lan deu khong tra loi
         # duoc vi log member bi an, ma an log thi khong con dau vet nao khac.
         self._luot_da_gui = (int(tracker.generation or 0), int(tracker.turn or 0), time.time())
-        if tracker.generation and self._log_battle_verbose():
-            log.info(
-                "[%s] BATTLE SEND g=%d t=%d source=%s skill=%d target=%s",
-                self._label, tracker.generation, tracker.turn, source, d.skill, (d.b, d.target),
-            )
+        if tracker.generation:
+            _delay = time.time() - float(getattr(
+                self, "_turn_started_at", getattr(self, "_arm_first_at", time.time())))
+            if self._log_battle_verbose():
+                log.info(
+                    "[%s] BATTLE SEND g=%d t=%d source=%s skill=%d target=%s +%.2fs tu dau luot",
+                    self._label, tracker.generation, tracker.turn, source, d.skill, (d.b, d.target),
+                    _delay,
+                )
+            else:
+                # Mot dong gon/account/unit de tim member gui cham; khong dump state/skills.
+                log.info("[%s] BATTLE SEND MEMBER g=%d t=%d source=%s +%.2fs",
+                         self._label, tracker.generation, tracker.turn, source, _delay)
         return True
 
     def flee_battle(self):
@@ -10231,6 +10381,29 @@ class GameClient:
                                           "item": str(nm).strip(), "item_id": tid,
                                           "qty": qty, "target": "pet" if target else "character"})
         return True
+
+    def use_slot_wait(self, slot: int, target: int = 0, qty: int = 1, wait: float = 1.2):
+        """Nhu use_slot nhung CHO server ack 0x17/0900 cap nhat so luong roi moi tra.
+
+        UI bam tay (APK) can thay so luong MOI ngay, khong doi dashboard poll 2.5s. Ack 0x17/0900
+        da tu tru `bag_slots[slot][1]` (xem handler trong `_handle`), nen chi can doi so do doi.
+        Tra (ok, con_lai): ok=False khi slot het/khong gui duoc; con_lai = so luong server bao
+        (0 = het sach). KHONG doi `_pending_confirm_slot` (co che probe rieng, khong dung o day).
+        """
+        rec = self.bag_slots.get(slot)
+        if rec is not None and rec[1] <= 0:
+            return False, 0
+        before = int(rec[1]) if rec is not None else None
+        if not self.use_slot(slot, target=target, qty=qty):
+            return False, (0 if before is None else before)
+        t0 = time.time()
+        while self.running and time.time() - t0 < wait:
+            time.sleep(0.05)
+            cur = self.bag_slots.get(slot)
+            if cur is None or before is None or int(cur[1]) != before:
+                break
+        cur = self.bag_slots.get(slot)
+        return True, (0 if cur is None else int(cur[1]))
 
     def equip_item(self, slot: int) -> bool:
         """Trang bi item o SLOT (KHAC use_slot: item deo len nguoi, khong phai tieu hao). C2S 0x17:
@@ -15120,8 +15293,6 @@ class GameClient:
             _them = 0
             _cho_bu = 0.0
             while _them < 8 and self.running:
-                if not _nav_con_hieu_luc():
-                    return False
                 if abort and abort():
                     log.info("[%s] navigate_to: abort khi di bu -> dung", self._label)
                     return False

@@ -87,7 +87,15 @@ def team_debug_json():
                          "phase": str(task.get("phase", "")),
                          "waiting_seconds": task.get("elapsed", 0),
                          "party_members": len(getattr(c, "party_members", None) or []),
-                         "party_invite_ready": bool(getattr(c, "party_invite_ready", False))})
+                         "party_invite_ready": bool(getattr(c, "party_invite_ready", False)),
+                         # Trang thai DANH de tu chan doan "team khong tu danh":
+                         # auto_battle=OFF -> chua bat cong tac; flee=True -> dang bi luat L0
+                         # (thieu doi / lech map-kenh) tat danh de di gom; in_battle -> dang trong tran.
+                         "auto_battle": bool(getattr(c, "_auto_battle_enabled", False)),
+                         "auto_pursuit": bool(getattr(c, "_auto_pursuit_enabled", False)),
+                         "flee": bool(getattr(c, "flee_mode", False)),
+                         "in_battle": bool(c.in_combat())
+                         if (c is not None and callable(getattr(c, "in_combat", None))) else False})
     lines = []
     error = ""
     try:
@@ -527,14 +535,21 @@ def set_auto_mode_slot_json(slot, expected_username, mode):
     """AUTO theo dung slot UI; username chi dung de chan snapshot/tab bi lech."""
     try:
         slot = int(slot)
-        rows = list(_get_runner().party_accounts(0))
-        if slot < 0 or slot >= len(rows):
+        if slot < 0 or slot >= 5:
             raise ValueError("Slot account không hợp lệ")
-        username = str(rows[slot][0] or "").strip()
+        rows = list(_get_runner().party_accounts(0))
         expected = str(expected_username or "").strip()
-        if not username or (expected and username != expected):
+        if not expected:
+            raise RuntimeError("Tab chưa có account")
+        # party_accounts bo cac o trong va don danh sach lai, nen index cua no khong con
+        # la slot UI (vi du chi bat tab 1,2,3,5 thi tab 5 van la index 3). Dinh tuyen
+        # bang username va chi dung slot goc da ghi luc login de chan snapshot tab cu.
+        configured = next((str(row[0] or "").strip() for row in rows
+                           if str(row[0] or "").strip() == expected), "")
+        mapped_slot = _account_slots.get(expected)
+        if not configured or (mapped_slot is not None and int(mapped_slot) != slot):
             raise RuntimeError("Dữ liệu tab đã thay đổi, vui lòng bấm lại")
-        return set_auto_mode_json(username, mode)
+        return set_auto_mode_json(expected, mode)
     except Exception as e:
         return json.dumps({"ok": False, "message": str(e)}, ensure_ascii=False)
 
@@ -714,8 +729,12 @@ def account_action_json(username, action, payload="{}"):
             if not rec: raise RuntimeError("Vật phẩm đã đổi slot hoặc không còn trong túi")
             if client.item_locked(slot): raise RuntimeError("Vật phẩm đang khóa")
             qty = min(qty, int(rec[1]))
-            if not client.use_slot(slot, target=0, qty=qty): raise RuntimeError("Server không nhận lệnh dùng vật phẩm")
-            message = "Đã gửi dùng %d vật phẩm" % qty
+            # Cho server ack 0x17/0900 cap nhat lai so luong -> tra luon `count` moi cho UI, khong
+            # phai doi dashboard poll 2.5s (UI bam tay can thay so ngay).
+            ok, new_cnt = client.use_slot_wait(slot, target=0, qty=qty)
+            if not ok: raise RuntimeError("Server không nhận lệnh dùng vật phẩm")
+            return json.dumps({"ok": True, "slot": slot, "count": int(new_cnt),
+                               "message": "Đã dùng %d vật phẩm" % qty}, ensure_ascii=False)
         elif action == "toggle_lock":
             slot, locked = int(data.get("slot", 0)), bool(data.get("locked", True))
             client.set_item_lock(slot, locked)
@@ -736,6 +755,20 @@ def account_action_json(username, action, payload="{}"):
         return json.dumps({"ok": True, "message": message}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"ok": False, "message": str(exc)}, ensure_ascii=False)
+
+
+def bag_json(username):
+    """TUI DO cua 1 acc cho UI (nhe) - khong dung dashboard 5 acc.
+
+    Dung sau khi bam DUNG/DEO/VUT/PHAN GIAI/HOP de cap nhat lai so luong NGAY, tranh phai goi
+    `accounts_dashboard_json` (nang, quet ca 5 account) chi de lam moi 1 o tui.
+    """
+    try:
+        runner = _get_runner()
+        bag = runner.bag_info(str(username or "").strip()) or {}
+        return json.dumps({"ok": True, "bag": bag}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "bag": {}, "message": "%s" % exc}, ensure_ascii=False)
 
 
 def start_json(payload):
@@ -841,6 +874,8 @@ def start_json(payload):
             auto_world_boss=False, auto_team_dungeon=False, do_van_tieu=False,
             fight_legion_boss=False,
             di_gioi_level=max(1, min(15, int(data.get("di_gioi_level", 2) or 2))),
+            # Kieu Di Gioi: "party" (mac dinh, leader gom ca team) | "solo" (moi acc tu chay).
+            digioi_mode=("solo" if str(data.get("digioi_mode", "") or "").strip().lower() == "solo" else "party"),
             event_key=str(data.get("event_key", "") or ""),
             npc40_force=bool(data.get("npc40_force", False)),
             auto_sell_noi_dat=False, auto_bag_clean=False, auto_discard_junk=False,
@@ -958,9 +993,14 @@ def auto_battle_one_json(username, map_id=0, x=0, y=0):
         return json.dumps({"ok": False, "message": "%s" % exc}, ensure_ascii=False)
 
 
-def start_farm_mode_json(mode, map_id, x, y, di_gioi_level=2):
-    """Start the selected workflow without resetting account slots or battle settings."""
+def start_farm_mode_json(mode, map_id, x, y, di_gioi_level=2, digioi_mode="party"):
+    """Start the selected workflow without resetting account slots or battle settings.
+
+    `digioi_mode`: "party" (mac dinh - leader gom ca team trong DG) | "solo" (moi acc tu chay).
+    Chi ap dung cho mode `digioi_train` (mode `train` khong dung DG).
+    """
     mode = str(mode)
+    digioi_mode = "solo" if str(digioi_mode or "").strip().lower() == "solo" else "party"
     if mode == "train":
         return auto_battle_team_json(map_id, x, y)
     if mode == "stand":
@@ -991,6 +1031,7 @@ def start_farm_mode_json(mode, map_id, x, y, di_gioi_level=2):
             config.PARTY_CONFIG[0].update(mode="digioi_train", start_city_id=map_id,
                                          mob_index=0, train_pick="", do_daily=False,
                                          di_gioi_level=di_gioi_level,
+                                         digioi_mode=digioi_mode,
                                          auto_world_boss=False, auto_team_dungeon=False,
                                          fight_legion_boss=False, do_van_tieu=False)
             st["dt_phase"] = "digioi"

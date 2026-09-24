@@ -24,7 +24,40 @@ _heal_lock = threading.Lock()
 _heal_pool = {}          # key -> (sp, ts) ung vien heal
 _heal_done = {"t": 0.0}  # thoi diem heal gan nhat (ca party)
 HEAL_BARRIER = 0.4       # giay cho cac unit khac dang ky truoc khi chon
-HEAL_COOLDOWN = 2.5      # giay: trong cua so nay chi 1 unit heal
+HEAL_COOLDOWN = 0.5      # giay: trong cua so nay chi 1 unit heal
+# Cua so "yen" cua barrier: neu khong con ai dang ky moi trong bay nhieu giay -> THOAT SOM.
+# Truoc day `time.sleep(0.4)` co dinh: luot 1 mau con day -> khong vao barrier (nhanh), nhung
+# luot 2+ mau tut -> vao barrier -> lenh danh bi day them ~0.4s MOI LUOT. Thoat som giu nguyen
+# tac "cho cac acc dang ky" (van cho toi da `BARRIER` neu con acc dang ky) nhung tra ve ngay khi
+# da du nguoi -> bot ra lenh danh nhanh hon.
+BARRIER_QUIET = 0.12     # giay yen (khong co dang ky moi) thi thoat
+
+
+def _barrier_wait(pool, lock, barrier, tag):
+    """Cho toi da `barrier` giay, nhung thoat som khi `pool` ngung tang ~`BARRIER_QUIET`.
+
+    An toan: neu thoat som ma acc khac dang ky MUON hon, no se thay `_heal_done`/claim trong
+    cooldown -> khong heal trung, chi danh thuong (giong nhu khi barrier het han).
+    """
+    t0 = time.time()
+    last_n = -1
+    last_change = t0
+    while True:
+        now = time.time()
+        with lock:
+            n = len(pool)
+        if n != last_n:
+            last_n = n
+            last_change = now
+        elif now - last_change >= BARRIER_QUIET:
+            break
+        if now - t0 >= barrier:
+            break
+        time.sleep(0.02)
+    waited = time.time() - t0
+    if waited >= 0.2:
+        log.debug("[barrier %s] cho %.2fs (%d ung vien)", tag, waited, last_n)
+    return waited
 
 
 def _heal_decide(key, sp):
@@ -34,7 +67,7 @@ def _heal_decide(key, sp):
         if now - _heal_done["t"] < HEAL_COOLDOWN:
             return False                 # da co nguoi heal turn nay
         _heal_pool[key] = (sp, now)
-    time.sleep(HEAL_BARRIER)             # cho cac unit khac trong party dang ky
+    _barrier_wait(_heal_pool, _heal_lock, HEAL_BARRIER, "heal")   # cho cac unit khac dang ky
     with _heal_lock:
         if time.time() - _heal_done["t"] < HEAL_COOLDOWN:
             return False                 # ai do da heal trong luc cho
@@ -56,7 +89,7 @@ _revive_claims = {}          # party_idx -> {(b1,b2): (owner_key, ts)}
 _revive_reg = {}             # (party_idx, b1, slot) -> True: o vi tri do co skill hoi sinh
 _support_reg = {}            # (party_idx, b1, slot) -> revive/protect/hp_heal/sp_restore roles
 REVIVE_BARRIER = 0.4
-REVIVE_COOLDOWN = 2.5
+REVIVE_COOLDOWN = 0.5
 
 
 def register_revive(party_idx, b1, slot):
@@ -121,7 +154,7 @@ def _revive_decide(key, sp, party_idx, dead_targets):
     with _revive_lock:
         _revive_cleanup(now)
         _revive_pool[key] = (sp, now, group, tuple(dead_targets))
-    time.sleep(REVIVE_BARRIER)
+    _barrier_wait(_revive_pool, _revive_lock, REVIVE_BARRIER, "revive")
     with _revive_lock:
         now = time.time()
         _revive_cleanup(now)
@@ -169,7 +202,7 @@ _break_lock = threading.Lock()
 _break_claims = {}
 _cc_lock = threading.Lock()
 _cc_claims = {}
-PROTECT_CLAIM_COOLDOWN = 2.5
+PROTECT_CLAIM_COOLDOWN = 0.5
 
 
 def _short_claim(claims_by_group, lock, group, target, owner,
@@ -221,7 +254,7 @@ _spr_lock = threading.Lock()
 _spr_pool = {}
 _spr_done = {"t": 0.0}
 SPR_BARRIER = 0.4
-SPR_COOLDOWN = 2.5
+SPR_COOLDOWN = 0.5
 
 
 def _sprestore_decide(key, sp):
@@ -232,7 +265,7 @@ def _sprestore_decide(key, sp):
         if now - _spr_done["t"] < SPR_COOLDOWN:
             return False
         _spr_pool[key] = (sp, now)
-    time.sleep(SPR_BARRIER)
+    _barrier_wait(_spr_pool, _spr_lock, SPR_BARRIER, "sp")
     with _spr_lock:
         if time.time() - _spr_done["t"] < SPR_COOLDOWN:
             return False
@@ -1271,18 +1304,18 @@ def _enemy_target_pos(state, offered, target_key):
         return _train_target(es, offered)
     alive = [(pos, hp) for pos, hp in state.enemy_hp.items()
              if hp > 0 and _col_reachable(_col(pos), set(offered))]
-    if not alive:
-        return None
-    if target_key == "enemy_low_hp":
-        return min(alive, key=lambda x: x[1])[0]
-    if target_key == "enemy_high_hp":
-        return max(alive, key=lambda x: x[1])[0]
-    if target_key == "enemy_last":
-        return max(alive, key=lambda x: x[0])[0]
-    if target_key == "dangerous_npc":
-        dangerous = _dangerous_enemy_positions(state, [pos for pos, _hp in alive])
-        if dangerous:
-            return dangerous[0]
+    # if not alive:
+    #     return None
+    # if target_key == "enemy_low_hp":
+    #     return min(alive, key=lambda x: x[1])[0]
+    # if target_key == "enemy_high_hp":
+    #     return max(alive, key=lambda x: x[1])[0]
+    # if target_key == "enemy_last":
+    #     return max(alive, key=lambda x: x[0])[0]
+    # if target_key == "dangerous_npc":
+    #     dangerous = _dangerous_enemy_positions(state, [pos for pos, _hp in alive])
+    #     if dangerous:
+    #         return dangerous[0]
     return min(alive, key=lambda x: x[0])[0]
 
 
@@ -1344,6 +1377,7 @@ def _custom_decision(state, unit, unit_key, skills, stat, options, atype=None):
     if not rules:
         return None
     at = state.my_atype if atype is None else atype
+    es = state.enemy_slots
     offered = _offered_targets(options, at)
     fb = offered[0] if offered else 1
     learned = set(skills or [])
@@ -1359,43 +1393,46 @@ def _custom_decision(state, unit, unit_key, skills, stat, options, atype=None):
         if skill == "flee":
             return Decision(unit, at, at, config.SKILL_FLEE, b=_hang_cua(state, unit))
         skill_id = config.SKILL_NORMAL if skill == "normal" else skill
-        if isinstance(skill_id, int) and skill_id != config.SKILL_NORMAL:
-            if skill_id not in learned:
-                continue
-            if stat.sp < _skill_cost(skill_id):
-                continue
-            if _is_revive(skill_id):
-                rv = _revive_decision_for_skill(state, unit, stat, skill_id)
-                if rv is not None:
-                    return rv
-                continue
-            if _is_cc_skill(skill_id):
-                cc = _try_cc_skill(state, unit, skill_id, stat, options, "custom",
-                                   target_key=target_key, atype=atype, require_mode=False)
-                if cc is not None:
-                    return cc
-                continue
-        if target_key in ("ally_low_hp", "ally_high_hp", "ally_low_sp", "ally_high_sp",
-                          "ally_revive_skill", "ally_protect_skill", "self"):
-            b1, b2 = _ally_target(state, target_key, unit, at)
-            if isinstance(skill_id, int) and skill_id != config.SKILL_NORMAL:
-                key = state.label + (":char" if unit == config.UNIT_CHAR else ":pet")
-                if skill_id in (getattr(config, "SKILL_HEAL_ALL", None),
-                                getattr(config, "SKILL_HEAL_ONE", None)):
-                    if not _claim_support_action(
-                        state, "heal_hp", (b1, b2), key, stat.sp, _heal_decide,
-                    ):
-                        continue
-                elif _cat(skill_id) == 6:
-                    if not _claim_support_action(
-                        state, "heal_sp", (b1, b2), key + ":spr", stat.sp,
-                        _sprestore_decide,
-                    ):
-                        continue
-            return Decision(unit, at, b2, skill_id, b=b1)
+        # if isinstance(skill_id, int) and skill_id != config.SKILL_NORMAL:
+        #     if skill_id not in learned:
+        #         continue
+        #     if stat.sp < _skill_cost(skill_id):
+        #         continue
+        #     if _is_revive(skill_id):
+        #         rv = _revive_decision_for_skill(state, unit, stat, skill_id)
+        #         if rv is not None:
+        #             return rv
+        #         continue
+        #     if _is_cc_skill(skill_id):
+        #         cc = _try_cc_skill(state, unit, skill_id, stat, options, "custom",
+        #                            target_key=target_key, atype=atype, require_mode=False)
+        #         if cc is not None:
+        #             return cc
+        #         continue
+        # if target_key in ("ally_low_hp", "ally_high_hp", "ally_low_sp", "ally_high_sp",
+        #                   "ally_revive_skill", "ally_protect_skill", "self"):
+        #     b1, b2 = _ally_target(state, target_key, unit, at)
+        #     if isinstance(skill_id, int) and skill_id != config.SKILL_NORMAL:
+        #         key = state.label + (":char" if unit == config.UNIT_CHAR else ":pet")
+        #         if skill_id in (getattr(config, "SKILL_HEAL_ALL", None),
+        #                         getattr(config, "SKILL_HEAL_ONE", None)):
+        #             if not _claim_support_action(
+        #                 state, "heal_hp", (b1, b2), key, stat.sp, _heal_decide,
+        #             ):
+        #                 continue
+        #         elif _cat(skill_id) == 6:
+        #             if not _claim_support_action(
+        #                 state, "heal_sp", (b1, b2), key + ":spr", stat.sp,
+        #                 _sprestore_decide,
+        #             ):
+        #                 continue
+        #     return Decision(unit, at, b2, skill_id, b=b1)
         if not _can_attack_new_enemy_gen(state, unit, atype=atype):
             return None
-        pos = _enemy_target_pos(state, offered, target_key)
+        # pos = _enemy_target_pos(state, offered, target_key)
+        # if pos is None:
+        #     return None
+        pos = _train_target(es, offered)
         if pos is None:
             return None
         return _attack(unit, at, pos, skill_id, fb, offered)
@@ -1527,40 +1564,40 @@ def decide_char(state, options, first_turn=False):
     elif custom is not None:
         return custom
     # HOI SINH (truoc heal): co dong doi chet + char co skill hoi sinh + thang dieu phoi
-    rv = _try_revive(state, config.UNIT_CHAR, state.skills_char, state.char, options)
-    if rv is not None:
-        return rv
-    # CC ti le cao (quest only): sau Hoi Sinh, truoc buff bao ve.
-    cc = _try_cc(state, config.UNIT_CHAR, state.skills_char, state.char, options, "high")
-    if cc is not None:
-        return cc
-    # BUFF BAO VE (quest/boss): Ket Gioi -> An Than -> Kinh, truoc heal HP/SP.
-    prot = _try_protect(state, config.UNIT_CHAR, state.skills_char, state.char)
-    if prot is not None:
-        return prot
-    # CC ti le thap / Hon Loan (quest only): sau buff bao ve.
-    cc = _try_cc(state, config.UNIT_CHAR, state.skills_char, state.char, options, "low")
-    if cc is not None:
-        return cc
+    # rv = _try_revive(state, config.UNIT_CHAR, state.skills_char, state.char, options)
+    # if rv is not None:
+    #     return rv
+    # # CC ti le cao (quest only): sau Hoi Sinh, truoc buff bao ve.
+    # cc = _try_cc(state, config.UNIT_CHAR, state.skills_char, state.char, options, "high")
+    # if cc is not None:
+    #     return cc
+    # # BUFF BAO VE (quest/boss): Ket Gioi -> An Than -> Kinh, truoc heal HP/SP.
+    # prot = _try_protect(state, config.UNIT_CHAR, state.skills_char, state.char)
+    # if prot is not None:
+    #     return prot
+    # # CC ti le thap / Hon Loan (quest only): sau buff bao ve.
+    # cc = _try_cc(state, config.UNIT_CHAR, state.skills_char, state.char, options, "low")
+    # if cc is not None:
+    #     return cc
     # HOI MAU: thanh vien HP yeu + du SP + co skill heal + la con SP cao nhat duoc heal
-    if (state.any_ally_low(config.HEAL_HP_THRESHOLD)
-            and state.char.sp >= config.HEAL_SP_COST
-            and config.SKILL_HEAL_ALL in state.skills_char):
-        _low = state.lowest_hp_ally()
-        _ht = _low.slot if (_low is not None and getattr(_low, "slot", None) is not None) else at
-        _hc = _hang_char_ta(state)   # LOAN DAU doi phe -> char ta khong con o hang 3
-        if _claim_support_action(
-            state, "heal_hp", (_hc, _ht), state.label + ":char",
-            state.char.sp, _heal_decide,
-        ):
-            return Decision(config.UNIT_CHAR, at, _ht, config.SKILL_HEAL_ALL, b=_hc)
+    # if (state.any_ally_low(config.HEAL_HP_THRESHOLD)
+    #         and state.char.sp >= config.HEAL_SP_COST
+    #         and config.SKILL_HEAL_ALL in state.skills_char):
+    #     _low = state.lowest_hp_ally()
+    #     _ht = _low.slot if (_low is not None and getattr(_low, "slot", None) is not None) else at
+    #     _hc = _hang_char_ta(state)   # LOAN DAU doi phe -> char ta khong con o hang 3
+    #     if _claim_support_action(
+    #         state, "heal_hp", (_hc, _ht), state.label + ":char",
+    #         state.char.sp, _heal_decide,
+    #     ):
+    #         return Decision(config.UNIT_CHAR, at, _ht, config.SKILL_HEAL_ALL, b=_hc)
     # HOI SP TOAN TEAM (chi quest_mode): sau heal HP, truoc tan cong
-    spr = _try_sp_restore(state, config.UNIT_CHAR, state.skills_char, state.char)
-    if spr is not None:
-        return spr
-    br = _try_break_enemy_protect(state, config.UNIT_CHAR, state.skills_char, state.char, options)
-    if br is not None:
-        return br
+    # spr = _try_sp_restore(state, config.UNIT_CHAR, state.skills_char, state.char)
+    # if spr is not None:
+    #     return spr
+    # br = _try_break_enemy_protect(state, config.UNIT_CHAR, state.skills_char, state.char, options)
+    # if br is not None:
+    #     return br
     if _is_mineral_battle(state):
         # BO CHAY nham CHINH MINH -> hang phai la hang cua MINH (loan dau = 0, khong phai 3).
         return Decision(config.UNIT_CHAR, at, at, config.SKILL_FLEE, b=_hang_char_ta(state))
@@ -1577,40 +1614,40 @@ def decide_pet(state, options, first_turn=False):
     elif custom is not None:
         return custom
     # HOI SINH (truoc heal): co dong doi chet + pet co skill hoi sinh + thang dieu phoi
-    rv = _try_revive(state, config.UNIT_PET, state.pet_skills, state.pet, options)
-    if rv is not None:
-        return rv
-    # CC ti le cao (quest only): sau Hoi Sinh, truoc buff bao ve.
-    cc = _try_cc(state, config.UNIT_PET, state.pet_skills, state.pet, options, "high")
-    if cc is not None:
-        return cc
-    # BUFF BAO VE (quest/boss): Ket Gioi -> An Than -> Kinh, truoc heal HP/SP.
-    prot = _try_protect(state, config.UNIT_PET, state.pet_skills, state.pet)
-    if prot is not None:
-        return prot
-    # CC ti le thap / Hon Loan (quest only): sau buff bao ve.
-    cc = _try_cc(state, config.UNIT_PET, state.pet_skills, state.pet, options, "low")
-    if cc is not None:
-        return cc
+    # rv = _try_revive(state, config.UNIT_PET, state.pet_skills, state.pet, options)
+    # if rv is not None:
+    #     return rv
+    # # CC ti le cao (quest only): sau Hoi Sinh, truoc buff bao ve.
+    # cc = _try_cc(state, config.UNIT_PET, state.pet_skills, state.pet, options, "high")
+    # if cc is not None:
+    #     return cc
+    # # BUFF BAO VE (quest/boss): Ket Gioi -> An Than -> Kinh, truoc heal HP/SP.
+    # prot = _try_protect(state, config.UNIT_PET, state.pet_skills, state.pet)
+    # if prot is not None:
+    #     return prot
+    # # CC ti le thap / Hon Loan (quest only): sau buff bao ve.
+    # cc = _try_cc(state, config.UNIT_PET, state.pet_skills, state.pet, options, "low")
+    # if cc is not None:
+    #     return cc
     # HOI MAU: pet co skill heal + dong doi yeu + du SP + la con SP cao nhat
-    if (state.any_ally_low(config.HEAL_HP_THRESHOLD)
-            and state.pet.sp >= config.HEAL_SP_COST
-            and config.SKILL_HEAL_ALL in state.pet_skills):
-        _low = state.lowest_hp_ally()
-        _ht = _low.slot if (_low is not None and getattr(_low, "slot", None) is not None) else at
-        _hc = _hang_char_ta(state)   # LOAN DAU doi phe -> char ta khong con o hang 3
-        if _claim_support_action(
-            state, "heal_hp", (_hc, _ht), state.label + ":pet",
-            state.pet.sp, _heal_decide,
-        ):
-            return Decision(config.UNIT_PET, at, _ht, config.SKILL_HEAL_ALL, b=_hc)
+    # if (state.any_ally_low(config.HEAL_HP_THRESHOLD)
+    #         and state.pet.sp >= config.HEAL_SP_COST
+    #         and config.SKILL_HEAL_ALL in state.pet_skills):
+    #     _low = state.lowest_hp_ally()
+    #     _ht = _low.slot if (_low is not None and getattr(_low, "slot", None) is not None) else at
+    #     _hc = _hang_char_ta(state)   # LOAN DAU doi phe -> char ta khong con o hang 3
+    #     if _claim_support_action(
+    #         state, "heal_hp", (_hc, _ht), state.label + ":pet",
+    #         state.pet.sp, _heal_decide,
+    #     ):
+    #         return Decision(config.UNIT_PET, at, _ht, config.SKILL_HEAL_ALL, b=_hc)
     # HOI SP TOAN TEAM (chi quest_mode): sau heal HP, truoc tan cong
-    spr = _try_sp_restore(state, config.UNIT_PET, state.pet_skills, state.pet)
-    if spr is not None:
-        return spr
-    br = _try_break_enemy_protect(state, config.UNIT_PET, state.pet_skills, state.pet, options)
-    if br is not None:
-        return br
+    # spr = _try_sp_restore(state, config.UNIT_PET, state.pet_skills, state.pet)
+    # if spr is not None:
+    #     return spr
+    # br = _try_break_enemy_protect(state, config.UNIT_PET, state.pet_skills, state.pet, options)
+    # if br is not None:
+    #     return br
     if _is_mineral_battle(state):
         return Decision(config.UNIT_PET, at, at, config.SKILL_FLEE, b=_hang_pet_ta(state))
     return _combat_attack(state, config.UNIT_PET, state.pet_skills, state.pet, options,
