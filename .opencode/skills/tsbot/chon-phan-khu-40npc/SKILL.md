@@ -46,6 +46,13 @@ Chính sách này **ĐỘC LẬP** với phân khu farm (`chon-phan-khu-farm`): 
      `switch_channel(khu, theo_lenh=True)`; member theo `channel_ready` qua cùng khu (barrier).
    - **MANUAL**: dùng `event_channel_manual`; nếu không có/không đủ chỗ → `_bao_khong_du_cho_40npc`
      (toast) và **chờ** user chọn lại (không tự đổi khu khác).
+   - **Mặc định (không AUTO, không MANUAL)**: **hội tụ về kênh hiện tại của leader** (kéo member
+     đang ở kênh khác về). Trên map event, party trây kênh = KHÔNG BAO GIỜ lập được → luôn phải
+     hội tụ 1 kênh, nên `_event_channel_policy_active` **luôn bật cho 40NPC** (AUTO chỉ quyết định
+     chọn kênh nào).
+5. **Leader cũng chạy lại picker khi có RE-SYNC**: `VIEC_DONG_BO` → `resync_gen` bump → **cả leader
+   lẫn member** chạy lại `do_channel_sync` (trước đây chỉ member → leader không chọn lại kênh →
+   member chờ `channel_ready` mãi → kẹt 1 người 1 kênh).
 5. Khu vừa chọn bị người khác lấp đầy (server trả mã 4) → kênh đó vào "sổ đen" tạm thời, picker
    **dò lại** khu khác (AUTO). MANUAL thì toast để user chọn lại.
 6. Đồng bộ xong (cả team cùng map + khu) → leader gom PT → `npc40.run_loop`.

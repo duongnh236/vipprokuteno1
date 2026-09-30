@@ -1018,6 +1018,56 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("if event_party_mode:", block)
         self.assertIn("_cho_user_ngoai_vao_party(c, st, pidx, label", block)
 
+    def test_event_channel_picker_default_converges_to_leader_channel(self):
+        # KHONG bat AUTO, KHONG ghim MANUAL -> phai HOI TU ve kenh hien tai cua leader (keo member
+        # dang o kenh khac ve), khong duoc tra `_K40_NA`/0 lam member dung nguyen kenh (bug 30/09).
+        sentinel = object()
+        st = {"lock": threading.RLock(), "event_channel_auto": False, "event_channel_manual": 0,
+              "event_channel_pick": 0, "event_channel_map": 0, "event_channel_status": ""}
+        c = SimpleNamespace(current_map=10991, current_channel=2, switch_channel=Mock(return_value=True))
+        m = SimpleNamespace(current_map=10991, current_channel=3, switch_channel=Mock(return_value=True))
+        ns = self._event_picker_ns({2: (1, 10), 3: (4, 10)}, sentinel)
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
+        self.assertEqual(fn(0, st, [("leader", c), ("m", m)], 2, "leader", c), 2)
+
+    def test_event_channel_picker_converged_returns_zero(self):
+        sentinel = object()
+        st = {"lock": threading.RLock(), "event_channel_auto": False, "event_channel_manual": 0,
+              "event_channel_pick": 0, "event_channel_map": 0, "event_channel_status": ""}
+        c = SimpleNamespace(current_map=10991, current_channel=2, switch_channel=Mock(return_value=True))
+        m = SimpleNamespace(current_map=10991, current_channel=2, switch_channel=Mock(return_value=True))
+        ns = self._event_picker_ns({2: (2, 10)}, sentinel)
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
+        self.assertEqual(fn(0, st, [("leader", c), ("m", m)], 2, "leader", c), 0)
+        c.switch_channel.assert_not_called()
+
+    def test_event_leader_reruns_channel_sync_on_resync(self):
+        # Leader cung phai chay lai picker khi co RE-SYNC (truoc day chi member -> leader khong chon
+        # lai kenh -> member cho channel_ready mai -> ket 1 nguoi 1 kenh).
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn("(LEADER) co RE-SYNC -> chay lai dong bo kenh", rp)
+
+    def test_send_blocks_event_step_during_battle(self):
+        # Ma 47 <ket thuc su kien khi tran chua ket thuc>: `0x14 06` gui khi dang trong tran -> server
+        # ngat. Phai chan o cua `send()` (luoi cuoi cung moi duong).
+        src = (ROOT / "train_bot/client.py").read_text()
+        self.assertIn("CHAN 0x14 06 (buoc su kien) vi DANG TRONG TRAN", src)
+
+    def test_leader_kick_does_not_logout_whole_party(self):
+        # Leader bi KICK (ma 5/47/90) -> member PHAI o lai, khong duoc set leader_gone (set = ca
+        # party out theo, bug user 30/09).
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn("KHONG set leader_gone, member o lai cho", rp)
+        self.assertIn('st["leader_manual_off"] = False', rp)
+
+    def test_event_channel_picker_uses_defined_song(self):
+        # Regression (log 30/09): `_chot_kenh_40npc` goi trong `do_channel_sync` -- o do KHONG co
+        # bien `song` -> truyen `song` gay NameError -> run_account crash -> leader RELOGIN -> ma 90
+        # -> OUT truoc khi gom PT. Phai truyen `_acc_song(pidx)`.
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn("else _chot_kenh_40npc(pidx, st, _acc_song(pidx), need, label, c)", rp)
+        self.assertNotIn("else _chot_kenh_40npc(pidx, st, song, need, label, c)", rp)
+
     def test_event_channel_picker_manual_rejects_when_not_enough(self):
         sentinel = object()
         st = {"lock": threading.RLock(), "event_channel_auto": False, "event_channel_manual": 7,

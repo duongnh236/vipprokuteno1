@@ -3265,6 +3265,16 @@ class GameClient:
     def send(self, opcode: int, payload: bytes):
         if not self.running or self.sock is None:
             return   # da rot ket noi -> bo qua (timer combat co the fire sau khi socket dong)
+        # CHAN MA 47 <ket thuc su kien khi tran chua ket thuc>: `0x14 06` = C:020-006 <buoc tiep su
+        # kien>. Gui khi server CON dang giai tran -> S:000-000 ma 47 -> DUT KET NOI (leader rot ->
+        # tan doi, party khong bao gio gom du). `scene_resume` da co guard nhung co RACE (vua thay
+        # het tran, server chua giai xong) va con ~15 duong khac cung gui `0x14 06`. Day la LUOI CUOI
+        # CUNG cho MOI duong: dang trong tran thi KHONG gui, va ghi ro de biet duong nao goi sai luc.
+        if (opcode == 0x14 and payload[:2] == b"\x06\x00"
+                and getattr(getattr(self, "state", None), "in_battle", False)):
+            log.warning("[%s] CHAN 0x14 06 (buoc su kien) vi DANG TRONG TRAN -> bo qua (tranh ma 47)",
+                        self._label)
+            return
         if opcode != protocol.OP_HEARTBEAT:
             log.debug("[%s] SEND op=0x%02x: %s", self._label, opcode, payload.hex())
             self._recent_sends.append((time.time(), opcode, payload.hex()))
