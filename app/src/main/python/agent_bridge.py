@@ -1307,6 +1307,128 @@ def set_train_channel_policy_json(auto_mode=False, channel=0):
         return json.dumps({"ok": False, "message": "%s" % exc}, ensure_ascii=False)
 
 
+def set_event_channel_policy_json(auto_mode=False, channel=0):
+    """Chon phan khu CHO 40NPC (tab leader): AUTO vang / MANUAL ghim 1 khu.
+
+    CHI LUU thiet lap. Viec chon/doi khu do picker `_chot_kenh_40npc` lam khi CA TEAM da vao map
+    event (40NPC map 10991 - danh sach kenh RIENG theo tung map, khac farm).
+      - AUTO: do kenh it nguoi nhat con du cho ca team; khong du -> tu do lai (KHONG toast).
+      - MANUAL: ghim 1 khu; khong du cho -> toast cho user chon lai. Kiem tra live ngay khi ap dung.
+    """
+    try:
+        runner = _get_runner()
+        st = runner._pstate(0)
+        auto_mode = bool(auto_mode)
+        channel = int(channel or 0)
+        need = max(1, len(runner.party_accounts(0)))
+        # USER NGOAI (neu bat) cung can 1 cho -> tinh vao suc chua can khi kiem tra khu.
+        if st.get("ext_invite_on") and str(st.get("ext_invite_name") or "").strip():
+            need += 1
+        if auto_mode:
+            with st["lock"]:
+                st["event_channel_auto"] = True
+                st["event_channel_manual"] = 0
+                st["event_channel_pick"] = 0
+                st["event_channel_map"] = 0
+                st["event_channel_status"] = "auto"
+                st["event_channel_notice_sig"] = None
+            log.info(">>> 40NPC PHAN KHU: BAT tu chon khu vang (chon khi CA TEAM da vao map event)")
+            return json.dumps({"ok": True, "auto": True, "channel": 0, "message":
+                "Đã BẬT tự chọn phân khu 40NPC: bot chọn khu ít người nhất ĐỦ CHỖ cho cả team ngay "
+                "khi cả team vào map event; khu vừa đầy sẽ tự dò lại."}, ensure_ascii=False)
+        if channel <= 0:
+            with st["lock"]:
+                st["event_channel_auto"] = False
+                st["event_channel_manual"] = 0
+                st["event_channel_pick"] = 0
+                st["event_channel_status"] = ""
+                st["event_channel_notice_sig"] = None
+            log.info(">>> 40NPC PHAN KHU: TAT chon phan khu rieng")
+            return json.dumps({"ok": True, "auto": False, "channel": 0,
+                               "message": "Đã tắt chọn phân khu 40NPC (dùng phân khu hiện tại)"},
+                              ensure_ascii=False)
+        # MANUAL: kiem tra live ngay de bao som neu khong du cho.
+        live = _live_party(runner)
+        leader_name = next((u for u, _p, lead, _pet in runner.party_accounts(0) if lead), "")
+        leader = next((c for u, c in live if u == leader_name), live[0][1] if live else None)
+        rows = _channel_rows_for_map(leader, force=True, wait=True) if leader else []
+        info = next((row for row in (rows or []) if int(row["id"]) == channel), None)
+        if info is None:
+            return json.dumps({"ok": False, "message":
+                "Phân khu %d không có trên map hiện tại. Hãy chọn phân khu khác cho 40NPC."
+                % channel}, ensure_ascii=False)
+        free = int(info.get("free", -1))
+        if free >= 0 and free < need:
+            return json.dumps({"ok": False, "message":
+                "Phân khu %d chỉ còn %d chỗ, không đủ cho %d thành viên. Hãy chọn phân khu khác "
+                "cho 40NPC." % (channel, free, need)}, ensure_ascii=False)
+        with st["lock"]:
+            st["event_channel_auto"] = False
+            st["event_channel_manual"] = channel
+            st["event_channel_pick"] = channel
+            st["event_channel_status"] = "manual:%d" % channel
+            st["event_channel_notice_sig"] = None
+        log.info(">>> 40NPC PHAN KHU: GHIM khu %d (can %d cho, con %s)", channel, need, free)
+        return json.dumps({"ok": True, "auto": False, "channel": channel, "message":
+            "Đã GHIM phân khu %d cho 40NPC (còn %s chỗ, cần %d). Cả team sẽ qua khi vào map event."
+            % (channel, free if free >= 0 else "?", need)}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "message": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+def poll_ui_notices_json(after=0):
+    """Tra cac thong bao Python -> UI (toast) moi hon moc `after`. Android nho `seq` lon nhat."""
+    try:
+        from train_bot import ui_notice
+        data = ui_notice.poll(after)
+        return json.dumps({"ok": True, "seq": int(data.get("seq", 0)),
+                           "notices": data.get("notices", [])}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "seq": int(after or 0), "notices": [],
+                           "message": "%s" % exc}, ensure_ascii=False)
+
+
+def set_external_invite_json(enabled=False, username=""):
+    """BAT/TAT moi 1 USER NGOAI (nhap tay) vao party cua leader.
+
+    CHI khi bat (`enabled=True`) VA co ten: leader moi nguoi do trong luc lap party, cho toi da
+    `EXT_INVITE_TIMEOUT_SEC` (5 phut). Het 5 phut ma khong vao -> HUY lenh, chay tiep flow. Party
+    da du 5 nguoi -> khong moi. Tat -> khong lam gi (tranh spam / va cham luong khac).
+    """
+    try:
+        runner = _get_runner()
+        st = runner._pstate(0)
+        on = bool(enabled)
+        name = str(username or "").strip()
+        if on and not name:
+            return json.dumps({"ok": False, "message": "Hãy nhập tên user ngoài"}, ensure_ascii=False)
+        if len(name) > 24 or any(ord(ch) < 32 for ch in name):
+            return json.dumps({"ok": False, "message": "Tên user ngoài không hợp lệ"}, ensure_ascii=False)
+        with st["lock"]:
+            changed = (bool(st.get("ext_invite_on")) != on
+                       or str(st.get("ext_invite_name") or "") != name)
+            st["ext_invite_on"] = on
+            st["ext_invite_name"] = name
+            if changed:
+                st["ext_invite_gen"] = int(st.get("ext_invite_gen") or 0) + 1
+                st["ext_invite_gen_done"] = -1
+                st["ext_invite_started_at"] = 0.0
+                st["ext_invite_last_at"] = 0.0
+                st["ext_invite_status"] = "waiting" if (on and name) else "idle"
+        if on and name:
+            log.info(">>> MOI USER NGOAI: BAT '%s' (cho toi da 5 phut khi lap party)", name)
+            msg = "Đã BẬT mời user ngoài '%s' (leader mời khi lập party, tối đa 5 phút)" % name
+        else:
+            log.info(">>> MOI USER NGOAI: TAT")
+            msg = "Đã tắt mời user ngoài"
+        return json.dumps({"ok": True, "enabled": on, "username": name, "message": msg},
+                          ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "message": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
 def run_daily_tasks_json(tasks_json):
     try:
         if _get_runner()._pstate(0).get("leader_switch_pending"):
@@ -1654,7 +1776,15 @@ def accounts_dashboard_json():
             train_target = st.get("ui_train_target")
             channel_auto = bool(st.get("train_channel_auto"))
             channel_manual = st.get("train_channel_manual")
+            event_channel_auto = bool(st.get("event_channel_auto"))
+            event_channel_manual = int(st.get("event_channel_manual") or 0)
+            event_channel_status = str(st.get("event_channel_status") or "")
         configured = runner.party_accounts(0)
+        # USER NGOAI (nhap o tab Dieu Khien) duoc TINH VAO SI SO TEAM: 3 bot + 1 ngoai = 4, khong
+        # phai 3. Chi la hien thi; vong moi bot van dung `n_members` (so bot), nguoi ngoai do
+        # `_cho_user_ngoai_vao_party` lo rieng.
+        ext_invite_on = bool(st.get("ext_invite_on")) and bool(str(st.get("ext_invite_name") or "").strip())
+        expected_total = len(configured) + (1 if ext_invite_on else 0)
         leader_user = next((u for u, _p, is_leader, _pet in configured if is_leader), "")
         leader_client = runner.account_clients.get(leader_user)
         if leader_client is None or not getattr(leader_client, "running", False):
@@ -1757,10 +1887,16 @@ def accounts_dashboard_json():
                 "x": int(pos[0] or 0), "y": int(pos[1] or 0),
                 "channel": int(getattr(client, "current_channel", 0) or 0),
                 "party_count": int(party_count),
-                "party_expected": int(len(configured)),
+                "party_expected": int(expected_total),
+                "ext_invite_on": ext_invite_on,
+                "ext_invite_name": str(st.get("ext_invite_name") or ""),
                 "channel_auto": channel_auto,
                 "channel_manual": channel_manual,
                 "channel_options": channel_options,
+                "event_channel_auto": event_channel_auto,
+                "event_channel_manual": event_channel_manual,
+                "event_channel_status": event_channel_status,
+                "event_channel_options": channel_options,
                 "train_map": int(train_target[0]) if train_target else None,
                 "train_map_name": config.map_display_name(int(train_target[0])) if train_target else None,
                 "train_x": int(train_target[1]) if train_target else None,

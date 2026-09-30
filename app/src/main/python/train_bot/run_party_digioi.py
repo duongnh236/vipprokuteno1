@@ -1336,6 +1336,139 @@ def _invite_whitelist_followers_if_bot_party_ready(c, st, pidx, label, force=Fal
         return 0
 
 
+# --- MOI 1 USER NGOAI (nhap tay o tab Dieu Khien) vao party cua leader ---
+EXT_INVITE_TIMEOUT_SEC = 300.0   # 5 phut hieu luc: khong vao -> huy lenh, chay tiep flow
+EXT_INVITE_GAP_SEC = 5.0         # gian cach moi lai
+PARTY_MAX_MEMBERS = 5            # party toi da 5 nguoi
+
+
+def _tim_entity_theo_ten(c, name):
+    """Tim entity cua 1 nguoi theo TEN tu cache `entity_names` (0x03/0x27). None neu chua thay."""
+    key = str(name or "").strip().casefold()
+    if not key:
+        return None
+    for e, names in list((getattr(c, "entity_names", None) or {}).items()):
+        for x in (names or ()):
+            if str(x).strip().casefold() == key:
+                return bytes(e)
+    return None
+
+
+def _ext_invite_finish(st, gen, label, name, status, msg):
+    with st["lock"]:
+        st["ext_invite_status"] = status
+        st["ext_invite_gen_done"] = gen
+    log.info("[%s] MOI USER NGOAI '%s': %s", label, name, msg)
+
+
+def _ext_invite_session_reset(st):
+    """Mo lai PHIEN MOI cho viec MOI USER NGOAI -> lan chay tiep theo VAN doi user ngoai.
+
+    Truoc day `ext_invite_gen_done` giu nguyen sau lan moi dau (da vao / timeout / party full).
+    Vi `_pstate` song theo TIEN TRINH, nen sau khi logout ALL + login lai, hook
+    `_cho_user_ngoai_vao_party` thay `gen_done == gen` -> tra True NGAY -> leader chi pt cac bot
+    online roi chay tiep, KHONG doi user ngoai (dung loi user bao). Reset o MOI lan LOGIN MOI cua
+    leader (khong phai reconnect giua luong) de moi phien deu moi lai tu dau.
+    """
+    try:
+        if not (st.get("ext_invite_on") and str(st.get("ext_invite_name") or "").strip()):
+            return
+        with st["lock"]:
+            st["ext_invite_gen_done"] = -1
+            st["ext_invite_started_at"] = 0.0
+            st["ext_invite_last_at"] = 0.0
+            st["ext_invite_status"] = "waiting"
+    except Exception:
+        pass
+
+
+def _cho_user_ngoai_vao_party(c, st, pidx, label, gen=None, stopped=None):
+    """Leader: moi 1 USER NGOAI (nhap o tab Dieu Khien) vao party, cho toi da 5 phut.
+
+    Tra True khi XONG (da vao / huy / khong bat / party du), False khi BI NGAT (Stop / lenh moi).
+    Chi chay khi `ext_invite_on` VA co ten. Party da du `PARTY_MAX_MEMBERS` -> khong moi. Het
+    `EXT_INVITE_TIMEOUT_SEC` -> HUY lenh de flow chay tiep. KHONG dung vao whitelist/bot member.
+    """
+    if not st.get("ext_invite_on"):
+        return True
+    name = str(st.get("ext_invite_name") or "").strip()
+    if not name:
+        return True
+    gen_v = int(st.get("ext_invite_gen") or 0)
+    if int(st.get("ext_invite_gen_done") or -1) == gen_v:
+        return True
+    # Party da du nguoi -> khong con cho.
+    try:
+        total = len(getattr(c, "party_members", None) or ()) + 1
+    except Exception:
+        total = 1
+    if total >= PARTY_MAX_MEMBERS:
+        _ext_invite_finish(st, gen_v, label, name, "full",
+                           "party da du %d/%d -> KHONG moi ngoai, chay tiep flow"
+                           % (total, PARTY_MAX_MEMBERS))
+        return True
+    now = time.time()
+    with st["lock"]:
+        if not st.get("ext_invite_started_at"):
+            st["ext_invite_started_at"] = now
+            st["ext_invite_status"] = "inviting"
+        started = float(st["ext_invite_started_at"])
+    log.info("[%s] MOI USER NGOAI: bat dau cho '%s' vao party (toi da %.0fs)",
+             label, name, EXT_INVITE_TIMEOUT_SEC)
+    _reform0 = st.get("reform_gen")
+    while True:
+        if stopped is not None and stopped():
+            return False
+        if gen is not None and st.get("cmd_gen") != gen:
+            return False
+        if st.get("reform_gen") != _reform0:
+            # Dieu phoi vua ra lenh MOI (lap lai/gom...) -> nha cho, khong giu leader o day.
+            return False
+        if not getattr(c, "running", False):
+            return False
+        ent = _tim_entity_theo_ten(c, name)
+        try:
+            roster = {bytes(e) for e in (getattr(c, "party_members", None) or ())}
+        except Exception:
+            roster = set()
+        if ent is not None and ent in roster:
+            _ext_invite_finish(st, gen_v, label, name, "joined", "da vao party")
+            return True
+        now = time.time()
+        if now - started >= EXT_INVITE_TIMEOUT_SEC:
+            _ext_invite_finish(st, gen_v, label, name, "timeout",
+                               "het %.0fs chua vao -> HUY lenh, bat dau flow da setup"
+                               % EXT_INVITE_TIMEOUT_SEC)
+            return True
+        last = float(st.get("ext_invite_last_at") or 0.0)
+        if now - last >= EXT_INVITE_GAP_SEC:
+            st["ext_invite_last_at"] = now
+            if ent is not None:
+                try:
+                    visible, why = c._entity_is_visible_on_current_scene(ent)
+                except Exception:
+                    visible, why = True, ""
+                # Nguoi dung CHI DINH ro ten -> cu moi khi DA co entity, KHONG doi co `nearby`
+                # (ten co the den tu 0x27 chu khong phai 0x03). Entity sai thi server bo qua vo hai.
+                try:
+                    c.invite_entity(ent)
+                    log.info("[%s] MOI USER NGOAI: da moi '%s' (entity %s%s)", label, name,
+                             bytes(ent).hex()[:8], "" if visible else ", " + why)
+                except Exception as e:
+                    log.warning("[%s] MOI USER NGOAI: gui loi moi loi: %s", label, e)
+            else:
+                # In ten dang co trong cache de doi chieu vi sao khong tim thay.
+                try:
+                    known = sorted({str(n).strip() for ns in
+                                    (getattr(c, "entity_names", None) or {}).values()
+                                    for n in (ns or ()) if str(n).strip()})[:20]
+                except Exception:
+                    known = []
+                log.info("[%s] MOI USER NGOAI: chua thay '%s' quanh leader -> cho (dang biet: %s)",
+                         label, name, ", ".join(known) if known else "-")
+        time.sleep(2.0)
+
+
 def _party_is_in_train_phase(pcfg, st):
     # Android dang nhap o mode=stand, sau do nut AUTO BATTLE moi gan bai train live.
     # Tu luc co dich nay, phien phai duoc coi la train ke ca config goc van la stand.
@@ -2242,6 +2375,29 @@ def _pstate(pidx):
                               "manual_train_channel_ready": threading.Event(),
                               "train_channel_auto": False,
                               "train_channel_manual": None,
+                              # PHAN KHU RIENG CHO 40NPC (tab leader): tach han khoi farm vi 40NPC
+                              # chay map event 10991 (danh sach kenh rieng). AUTO = do kenh vang nhat
+                              # du cho ca team khi DA vao map event; MANUAL = user ghim 1 kenh, ca
+                              # team bat buoc qua, khong du cho -> toast cho user chon lai.
+                              "event_channel_auto": False,
+                              "event_channel_manual": 0,
+                              "event_channel_pick": 0,      # kenh picker da chot (on dinh 1 nhip)
+                              "event_channel_map": 0,       # map cua pick (kenh thuoc tung map)
+                              "event_channel_status": "",   # chuoi ngan de UI hien trang thai
+                              # Chong spam toast khi MANUAL khong du cho: 1 thong bao / (kenh, so
+                              # cho, so nguoi) trong 30s.
+                              "event_channel_notice_sig": None,
+                              "event_channel_notice_at": 0.0,
+                              # MOI USER NGOAI (nhap tay o tab Dieu Khien): leader moi 1 nguoi
+                              # KHONG phai bot vao party khi lap doi, toi da 5 phut. `gen` bump khi
+                              # doi thiet lap -> phien moi; `gen_done` = gen da xu ly xong.
+                              "ext_invite_on": False,
+                              "ext_invite_name": "",
+                              "ext_invite_gen": 0,
+                              "ext_invite_gen_done": -1,
+                              "ext_invite_started_at": 0.0,
+                              "ext_invite_last_at": 0.0,
+                              "ext_invite_status": "idle",
                               "daily_active": False,
                               "daily_cancel": False,
                               "daily_tasks": (),
@@ -2845,6 +3001,10 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                            else sum(1 for _u, _p, _l, _ in party_accounts(pidx) if not _l))
     except Exception:
         pass
+    # MOI lan LOGIN MOI cua leader (khong phai reconnect giua luong) -> mo lai phien moi user ngoai
+    # de lan chay tiep theo VAN doi user ngoai vao party (xem `_ext_invite_session_reset`).
+    if is_leader and not is_reconnect:
+        _ext_invite_session_reset(st)
     # EP DONG BO: ghi epoch phien nay dang chay. Sau khi relogin (do resync) run_account chay lai ->
     # doc epoch MOI (da bump) -> khop -> khong raise lai. _resync_ck so sanh voi gia tri nay.
     account_sync_epoch[username] = st.get("sync_epoch", 0)
@@ -3365,6 +3525,9 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
         c.state.force_quest_mode = (mode == "event")
         if c.state.force_quest_mode:
             c.state.quest_mode = True
+        # HO TRO TRONG TRAN (hoi sinh/CC/buff/heal/hoi SP) CHI o luong EVENT (40NPC/2K). Luong
+        # FARM (train/city/digioi) TAT -> combat chi danh thuan, khong barrier -> nhanh toi da.
+        c.state.support_combat = (mode == "event")
         c.default_pet_role = "quest" if mode == "event" else "train"
         # (nhom auto_bag_clean/discard_junk/decompose_scrolls/scroll_modes da gan SOM o tren -
         #  ngay sau khi co pcfg - vi cac ham do duoc goi trong khoi viec-hang-ngay o TREN cho nay.)
@@ -4168,10 +4331,16 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                     # o kenh cu, ho khong thay/khong nhan duoc loi moi nua (bot chi doi kenh duoc
                     # cho cac acc cua chinh no).
                     _manual_wl = _manual_whitelist_names(pidx, c)
+                    # 40NPC: phan khu rieng (AUTO vang / MANUAL) - UU TIEN truoc logic farm. Tra
+                    # `_K40_NA` khi khong ap dung -> chay nguyen logic cu ben duoi.
+                    _r40 = (_K40_NA if _manual_wl
+                            else _chot_kenh_40npc(pidx, st, song, need, label, c))
                     if _manual_wl:
                         log.info("[%s] (%s) co nick TAY trong whitelist %s -> GIU NGUYEN kenh %s "
                                  "(doi kenh se bo roi ho)", label, role, _manual_wl, c.current_channel)
                         r = 0
+                    elif _r40 is not _K40_NA:
+                        r = _r40
                     else:
                         # TRANH kenh dang hong: ca party bao "cung kenh N" ma khong thay nhau
                         # (khac instance) -> chon lai dung N thi van the. `st["kenh_hong"]` do
@@ -5292,6 +5461,7 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
               - cung map train + lech kenh  -> chi sync kenh, khong can ve thanh.
             Lech map that su moi ve thanh gom nhau (van la _do_reform nhu cu).
             """
+            nonlocal training_started   # reset de keepalive keo lai ra bai sau khi lap lai party
             # DIEU PHOI QUYET CO GOM HAY KHONG - acc chi chon *cach* thi hanh (L1, xem L3o trong
             # documents/RULE_DIEU_PHOI.md: ca party 10, 10/09). Chot GOM thi phai roi xuong
             # `_do_reform()`, khong duoc tu tra `True` = "da xu ly tai cho".
@@ -5392,6 +5562,19 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 except Exception as e:
                     log.warning("[%s] (LEADER) %s: loi moi lai party tai cho: %s",
                                 label, ly_do or "dong bo", e)
+                # MOI USER NGOAI (neu nguoi dung da bam AP DUNG MOI NGOAI): phai tinh vao party
+                # sau khi doi khu, khong chi cac bot online. Cho toi da 5 phut; gen_done chan moi
+                # lai trong cung phien (xem `_ext_invite_session_reset`).
+                try:
+                    _cho_user_ngoai_vao_party(c, st, pidx, label,
+                                              gen=st.get("cmd_gen"), stopped=_stopped)
+                except Exception as e:
+                    log.warning("[%s] (LEADER) %s: moi user ngoai loi (bo qua): %s",
+                                label, ly_do or "dong bo", e)
+            # DA LAP LAI PARTY TAI CHO -> phai KEO CA DOI RA LAI BAI (khong dung o safe).
+            # Reset co `training_started` de vong keepalive chay lai `_start_training()`; khong
+            # reset thi no tuong da train tu truoc -> dung im o safe mai (bug user bao).
+            training_started = False
             _bat_danh_neu_du_party()
             return True
 
@@ -6389,6 +6572,15 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 st["invited"].set()
                 log.info("[%s] (LEADER) DU PARTY (%d/%d member join)",
                          label, joined_member_count(pidx), st["n_members"])
+                # 40NPC / event party: GOM CA USER NGOAI vao party (neu nguoi dung da bam AP DUNG
+                # MOI NGOAI) truoc khi vao su kien. Cho toi da 5 phut; `gen_done` chan moi lai
+                # trong cung phien, `_ext_invite_session_reset` mo lai o moi phien login.
+                if event_party_mode:
+                    try:
+                        _cho_user_ngoai_vao_party(c, st, pidx, label,
+                                                  gen=st.get("cmd_gen"), stopped=_stopped)
+                    except Exception as e:
+                        log.warning("[%s] (LEADER) event: moi user ngoai loi (bo qua): %s", label, e)
                 if not train_on_map:
                     _invite_whitelist_followers_if_bot_party_ready(
                         c, st, pidx, label, force=True
@@ -7177,6 +7369,12 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                         if not _wait_event(st["manual_route_party_ready"], "leader lap party", timeout=None):
                             return
 
+                # MOI USER NGOAI (tab Dieu Khien): leader moi 1 nguoi ngoai, cho toi da 5 phut
+                # TRUOC khi keo ca doi ra bai. Party da du 5 nguoi -> bo qua; het 5 phut -> chay
+                # tiep flow. Khong dung vao whitelist/bot member nen khong va cham luong cu.
+                if route_leader and not _cho_user_ngoai_vao_party(
+                        c, st, pidx, label, gen=gen, stopped=_stopped):
+                    return
                 route_completed = False
                 if route_leader:
                     route_restart = {"needed": False, "reason": ""}
@@ -7499,6 +7697,12 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                     with st["lock"]:
                         st["channel"] = int(ch)
                     log.info("[%s] (%s) manual: da doi kenh -> %d", label, role, ch)
+                    # VUA DOI PHAN KHU XONG -> phai LAP LAI PARTY roi KEO CA DOI RA LAI BAI (dang
+                    # dung o safe). Reset co `training_started` de keepalive chay lai
+                    # `_start_training()`; khong reset thi no tuong da train tu truoc -> dung im o
+                    # safe mai (bug user: doi khu xong khong ve lai bai).
+                    if st.get("ui_train_target") and ch:
+                        training_started = False
                 else:
                     # KHONG bo lung: xuong duoi la nhanh "tiep tuc che do" -> _party_tai_cho_xu_ly
                     # se thay party LECH KENH (acc khac doi duoc) va goi do_channel_sync de gom ca
@@ -8713,6 +8917,13 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                                 _invite_party_participants(c, train_on_map, gap=1.0)
                             except Exception as e:
                                 log.warning("[%s] (LEADER) loi moi lai khi mat party: %s", label, e)
+                            # MOI USER NGOAI (neu bat) + phai keo lai ra bai sau khi lap lai party.
+                            try:
+                                _cho_user_ngoai_vao_party(c, st, pidx, label,
+                                                          gen=st.get("cmd_gen"), stopped=_stopped)
+                            except Exception as e:
+                                log.warning("[%s] (LEADER) moi user ngoai loi (bo qua): %s", label, e)
+                            training_started = False
             # --- RETRY KENH + RE-MOI moi 60s (ca DG lan map-train) ---
             # Kenh it nguoi nhat co the KHONG du cho ca party -> co dua ket lai kenh cu.
             # Leader cu train; dua chua join thi 1p chuyen lai kenh chung 1 lan; leader 1p moi lai.
@@ -8762,6 +8973,12 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                             try:
                                 _invite_party_participants(c, train_on_map, gap=1.0)
                             except Exception: pass
+                            # MOI USER NGOAI (neu bat) + keo lai ra bai sau khi lap lai party.
+                            try:
+                                _cho_user_ngoai_vao_party(c, st, pidx, label,
+                                                          gen=st.get("cmd_gen"), stopped=_stopped)
+                            except Exception: pass
+                            training_started = False
                     # DU PARTY roi ma chua train -> SET QS + RA TRAIN. Truoc day dieu kien la
                     # `nj >= 1`: CHI CAN MOT member la leader keo ra spot danh, du party con
                     # thieu 3 nguoi -> pham thang nguyen tac "gom DU party roi moi ra train"
@@ -11914,7 +12131,9 @@ def _dieu_phoi_thi_hanh_kenh(pidx, st, song, dich):
         return 0
     if st.get("ui_train_phase") == "farming":
         if any(int(getattr(c, "current_channel", 0) or 0) != int(dich) for _u, c in song):
-            party_switch_channel(pidx, dich)
+            # AUTO phan khu vang: giu co auto + ghim lua chon lam moc on dinh (KHONG tat auto) -
+            # xem `party_switch_channel(keep_auto=...)`.
+            party_switch_channel(pidx, dich, keep_auto=bool(st.get("train_channel_auto")))
         return 0  # The queued flow reaches safe BEFORE anybody leaves party.
     # CON LECH MAP THI CHUA TOI LUOT KENH. Kenh la thu THEO TUNG MAP: kenh 2 co o map nay nhung
     # khong co o map kia, nen gui lenh doi kenh cho acc dang o map khac la chac chan hong.
@@ -11979,6 +12198,211 @@ def _dieu_phoi_thi_hanh_kenh(pidx, st, song, dich):
     return n
 
 
+def _chot_kenh_auto_vang(pidx, st, song, dem, map_chung, leader):
+    """CHECKBOX 'tu chon phan khu vang' (`st["train_channel_auto"]`): chon kenh VANG NHAT cho ca team.
+
+    CHI hoat dong khi DA TOI BAI TRAIN (`ui_train_phase == "farming"`), ca team dang CUNG 1 kenh
+    (`len(dem) == 1`) va leader thay >= 2 DOI khac quanh bai. Chon kenh IT NGUOI NHAT con du cho
+    ca team; neu khong kenh nao du cho thi thoi (cho nhip sau). Tra ve kenh can chuyen, hoac None
+    neu KHONG can doi (chua toi bai / <2 doi / dang o dung khu vang do roi).
+
+    `min((so_nguoi, kenh))` = kenh it nguoi nhat trong so du cho -> bao luon "xau nhat: khong kenh
+    nao vang thi lay kenh it nguoi nhat".
+
+    Tach rieng khoi `_dieu_phoi_chot_kenh` vi phai chay TRUOC nhanh `len(dem) <= 1` (party dang
+    cung kenh) - truoc day nhanh auto nam SAU do nen khong bao gio toi duoc (tich auto ma khong doi
+    khu). Viec THI HANH (safe -> tan PT -> doi -> lap lai PT) van do `party_switch_channel` lo.
+    """
+    if not st.get("train_channel_auto"):
+        return None
+    if not map_chung or len(dem) != 1:
+        return None                       # chua biet map / party dang tach kenh (co nhanh rieng)
+    if st.get("ui_train_phase") != "farming":
+        return None                       # chua toi bai train -> KHONG doi khu (user chot 21/09)
+    _farm_map = None
+    try:
+        _ui_t = st.get("ui_train_target")
+        if _ui_t:
+            _farm_map = int(_ui_t[0])
+    except Exception:
+        _farm_map = None
+    if _farm_map is None:
+        try:
+            _farm_map = _map_train_dich(pidx, st)
+        except Exception:
+            _farm_map = None
+    if not _farm_map or int(map_chung) != int(_farm_map):
+        return None                       # chua o map farm -> chua doi khu
+    _so_team_quanh = leader.nearby_other_team_count() if leader else 0
+    if _so_team_quanh < 2:
+        return None                       # quanh bai <2 doi -> giu nguyen khu
+    try:
+        _lam_moi_ds_kenh(pidx, st, song)
+        _bang = _bang_kenh(song, map_chung)
+    except Exception:
+        _bang = {}
+    _need = max(1, len(song))
+    _ung = [(int(_d), int(_ch)) for _ch, (_d, _con) in _bang.items() if int(_con) >= _need]
+    if not _ung:
+        return None                       # khong kenh nao du cho ca team -> cho nhip sau
+    _pick = int(st.get("auto_channel_pick") or 0)
+    _map_ok = st.get("auto_channel_map") == int(map_chung)
+    if not (_pick and _map_ok and _pick in _bang and _bang[_pick][1] >= _need):
+        _pick = min(_ung)[1]              # it nguoi nhat trong so du cho
+        with st["lock"]:
+            st["auto_channel_map"] = int(map_chung)
+            st["auto_channel_pick"] = _pick
+    if _pick in dem:
+        return None                       # dang o dung khu vang do roi -> khong doi
+    log.info("[party %d] DIEU PHOI AUTO: quanh bai %d doi (>=2) -> chon phan khu %d "
+             "(it nguoi nhat du %d cho; hien tai %s)", pidx + 1, _so_team_quanh, _pick,
+             _need, dict(sorted(dem.items())))
+    return _pick
+
+
+# ===================== PHAN KHU 40NPC =====================
+# Sentinel "khong ap dung" -> picker biet PHAI chay logic farm cu (khong phai kenh nao cung 0).
+_K40_NA = object()
+
+
+def _event_channel_policy_active(pidx, st):
+    """Party nay co bat CHE DO CHON PHAN KHU RIENG cho 40NPC khong (auto hoac manual).
+
+    Tach khoi farm: 40NPC chay map event (vd 10991) voi danh sach kenh rieng, va chi ap dung cho
+    event dang danh theo party (`kind == "npc_repeat"`).
+    """
+    try:
+        if not (st.get("event_channel_auto") or int(st.get("event_channel_manual") or 0) > 0):
+            return False
+        pcfg = getattr(config, "PARTY_CONFIG", {}).get(pidx, {}) or {}
+        if pcfg.get("mode") != "event":
+            return False
+        ev = _ev_cua_party(pcfg)
+        return ((ev or {}).get("party_battle") or {}).get("kind") == "npc_repeat"
+    except Exception:
+        return False
+
+
+def _bao_khong_du_cho_40npc(st, pidx, channel, info, need, ly_do=None):
+    """MANUAL: kenh user chon khong du cho ca team -> day toast len Android (chong spam 30s)."""
+    con = int(info[1]) if info else -1
+    sig = (int(channel), int(con), int(need), str(ly_do or ""))
+    now = time.time()
+    with st["lock"]:
+        if (st.get("event_channel_notice_sig") == sig
+                and now - float(st.get("event_channel_notice_at", 0.0) or 0.0) < 30.0):
+            return
+        st["event_channel_notice_sig"] = sig
+        st["event_channel_notice_at"] = now
+    if ly_do:
+        msg = ("40NPC: phân khu %d không qua được (%s). Hãy chọn phân khu khác cho 40NPC."
+               % (int(channel), ly_do))
+    elif info is None:
+        msg = ("40NPC: phân khu %d không có trên map này. Hãy chọn phân khu khác cho 40NPC."
+               % int(channel))
+    else:
+        msg = ("40NPC: phân khu %d chỉ còn %d chỗ, không đủ cho %d thành viên. "
+               "Hãy chọn phân khu khác cho 40NPC." % (int(channel), max(0, con), int(need)))
+    try:
+        from . import ui_notice
+        ui_notice.push(msg)
+    except Exception:
+        pass
+    log.warning("[party %d] 40NPC PHAN KHU: %s", pidx + 1, msg)
+
+
+def _chot_kenh_40npc(pidx, st, song, need, label, c):
+    """Picker 40NPC chon PHAN KHU cho ca team tren map event.
+
+    Tra: ``_K40_NA`` (khong ap dung -> luong farm cu quyet) | int(kenh) da doi duoc | 0 (chi 1 khu)
+    | None (chua chon duoc -> picker cho roi thu lai).
+
+    AUTO   : kenh IT NGUOI NHAT con du cho ca team (bo kenh vua bi server bao khong vao duoc).
+    MANUAL : kenh user ghim; khong du cho -> toast cho user chon lai (KHONG tu doi kenh khac).
+    """
+    if not _event_channel_policy_active(pidx, st):
+        return _K40_NA
+    map_id = int(getattr(c, "current_map", 0) or 0)
+    if not map_id:
+        return None
+    # CHI chon khi dang o DUNG map event - neu khong (vd con o thanh) thi kenh cua map do vo nghia.
+    try:
+        _pcfg = getattr(config, "PARTY_CONFIG", {}).get(pidx, {}) or {}
+        _dest = int((_ev_cua_party(_pcfg) or {}).get("dest_map") or 0)
+    except Exception:
+        _dest = 0
+    if _dest and map_id != _dest:
+        return _K40_NA
+    need = max(1, int(need))
+    # USER NGOAI (neu nguoi dung da bat AP DUNG MOI NGOAI) CUNG phai co cho trong khu -> cong vao
+    # suc chua can khi chon khu, khong thi khu vua du bot lai khong du cho nguoi ngoai.
+    try:
+        if st.get("ext_invite_on") and str(st.get("ext_invite_name") or "").strip():
+            need += 1
+    except Exception:
+        pass
+    try:
+        _lam_moi_ds_kenh(pidx, st, song)
+        bang = _bang_kenh(song, map_id)
+    except Exception:
+        bang = {}
+    if not bang:
+        return None
+    hong = set()
+    try:
+        hong = set(_doc_ket_qua_doi_kenh(song)[0])
+    except Exception:
+        pass
+    auto = bool(st.get("event_channel_auto"))
+    if auto:
+        ung = [(int(dang), int(ch)) for ch, (dang, con) in bang.items()
+               if int(con) >= need and int(ch) not in hong]
+        if not ung:
+            if time.time() - float(st.get("event_channel_wait_log", 0.0) or 0.0) > 60.0:
+                st["event_channel_wait_log"] = time.time()
+                log.info("[party %d] 40NPC AUTO: chua co phan khu nao du %d cho (bang=%s) -> cho",
+                         pidx + 1, need, dict(sorted(bang.items())))
+            return None
+        pick = min(ung)[1]
+    else:
+        pick = int(st.get("event_channel_manual") or 0)
+        if pick <= 0:
+            return _K40_NA
+        info = bang.get(pick)
+        if info is None or int(info[1]) < need:
+            _bao_khong_du_cho_40npc(st, pidx, pick, info, need)
+            return None
+    with st["lock"]:
+        st["event_channel_pick"] = int(pick)
+        st["event_channel_map"] = int(map_id)
+        st["event_channel_status"] = (("auto:%d" if auto else "manual:%d") % int(pick))
+    _ten = "AUTO" if auto else "MANUAL"
+    if int(getattr(c, "current_channel", 0) or 0) == int(pick):
+        log.info("[party %d] 40NPC %s: da o phan khu %d -> bao member qua day",
+                 pidx + 1, _ten, int(pick))
+        return int(pick)
+    ok = False
+    try:
+        ok = bool(c.switch_channel(int(pick), theo_lenh=True))
+    except Exception as e:
+        log.warning("[party %d] 40NPC %s: doi phan khu %d loi: %s", pidx + 1, _ten, int(pick), e)
+    if not ok:
+        # AUTO: kenh vua bi lap day -> nhip sau loai no ra (`hong`) va do lai. MANUAL: server bao
+        # day/khong co khu -> toast cho user chon lai (khong tu doi kenh khac).
+        if not auto:
+            _res = getattr(c, "_chan_switch_result", None)
+            _ly = ("khu đã đầy" if _res == 4 else
+                   "không có khu đó" if _res == 2 else
+                   ("server từ chối (mã %s)" % _res) if _res is not None else "server im lặng")
+            _bao_khong_du_cho_40npc(st, pidx, int(pick), bang.get(int(pick)), need, ly_do=_ly)
+        log.info("[party %d] 40NPC %s: doi phan khu %d CHUA duoc (ket qua %s) -> thu lai",
+                 pidx + 1, _ten, int(pick), getattr(c, "_chan_switch_result", None))
+        return None
+    log.info("[party %d] 40NPC %s: CHOT phan khu %d cho ca team (%d acc)",
+             pidx + 1, _ten, int(pick), need)
+    return int(pick)
+
+
 def _dieu_phoi_chot_kenh(pidx, st, song, kh=None):
     """DIEU PHOI tu chon KENH DICH cho ca party. Khong cho acc nao bao cao.
 
@@ -12039,6 +12463,11 @@ def _dieu_phoi_chot_kenh(pidx, st, song, kh=None):
         with st["lock"]:
             st["kenh_dich"] = None
             st["kenh_dich_luc"] = 0.0
+        return None
+    # 40NPC: nguoi dung bat chon phan khu rieng -> PICKER (`do_channel_sync`) la NGUON QUYET DUY
+    # NHAT. Dieu phoi KHONG chot va KHONG gui lenh doi kenh nua (tra None -> `_dieu_phoi_thi_hanh_
+    # kenh` khong lam gi), tranh 2 nguon lenh giang nhau. `kenh_dich` do picker tu ghi.
+    if _event_channel_policy_active(pidx, st):
         return None
     # CON LECH MAP -> KHONG DUNG TOI KENH, ke ca khi chua co ke hoach (`kh is None`).
     #
@@ -12110,6 +12539,7 @@ def _dieu_phoi_chot_kenh(pidx, st, song, kh=None):
     leader = next((c for u, c in song if u == leader_user), None)
     if st.get("train_channel_map") is not None and st["train_channel_map"] != map_chung:
         _train_adopt_map_channel(st, map_chung, getattr(leader, "current_channel", None))
+    _auto = bool(st.get("train_channel_auto"))
     _manual = int(st.get("train_channel_manual") or 0)
     if _manual <= 0:
         leader_user = config.PARTY_LEADER_ACC.get(pidx)
@@ -12146,7 +12576,7 @@ def _dieu_phoi_chot_kenh(pidx, st, song, kh=None):
                                 dict(sorted(dem.items())), _moi, _need)
                     party_switch_channel(pidx, _moi)
                     return _moi
-    if _manual > 0:
+    if _manual > 0 and not _auto:
         if len(dem) == 1 and _manual in dem:
             with st["lock"]:
                 st["kenh_dich"] = None
@@ -12159,6 +12589,16 @@ def _dieu_phoi_chot_kenh(pidx, st, song, kh=None):
         log.info("[party %d] DIEU PHOI: KHOA phan khu manual %d, hien tai %s -> khong tu chon khu khac",
                  pidx + 1, _manual, dict(sorted(dem.items())))
         return _manual
+    # CHECKBOX 'tu chon phan khu vang' (train_channel_auto): chon khu vang khi DA TOI BAI TRAIN.
+    # PHAI chay TRUOC nhanh `len(dem) <= 1` (party dang CUNG kenh) - truoc day nhanh auto nam SAU
+    # no nen return som -> tich auto ma khong bao gio doi khu.
+    if _auto:
+        _pick_auto = _chot_kenh_auto_vang(pidx, st, song, dem, map_chung, leader)
+        if _pick_auto:
+            with st["lock"]:
+                st["kenh_dich"] = _pick_auto
+                st["kenh_dich_luc"] = time.time()
+            return _pick_auto
     if len(dem) <= 1:
         with st["lock"]:
             st["kenh_dich"] = None           # dang chung kenh -> khong co viec gi
@@ -12483,45 +12923,6 @@ def _dieu_phoi_chot_kenh(pidx, st, song, kh=None):
     leader = next((c for u, c in song if u == leader_user), None)
     dich = int(st.get("train_channel_manual") or 0)
     _vi_sao = "phân khu manual"
-    # CHECKBOX auto phan khu vang: CHI chon khi party DA O BAI TRAIN (khong chon luc con o thanh /
-    # dang di duong). User chot 21/09: "tick vao thi toi bai train roi moi check". Khi bat auto thi
-    # BO QUA ghim manual (de kenh leader truoc do khong chan viec chon kenh vang o bai).
-    _farm_map = None
-    try:
-        _ui_t = st.get("ui_train_target")
-        if _ui_t:
-            _farm_map = int(_ui_t[0])
-    except Exception:
-        _farm_map = None
-    if _farm_map is None:
-        try:
-            _farm_map = _map_train_dich(pidx, st)
-        except Exception:
-            _farm_map = None
-    if (st.get("train_channel_auto") and map_chung and _farm_map
-            and int(map_chung) == int(_farm_map)):
-        # Chi doi vi DONG khi leader thay tan mat >= 2 party KHAC quanh bai. Neu chua dong thi
-        # giu nguyen khu hien tai, tranh cu moi lan dan so thay doi lai pha party.
-        _so_team_quanh = leader.nearby_other_team_count() if leader else 0
-        if _so_team_quanh >= 2:
-            _lam_moi_ds_kenh(pidx, st, song)
-            _bang = _bang_kenh(song, map_chung)
-            _need = max(1, len(song))
-            _ung = [(dang, int(ch)) for ch, (dang, con) in _bang.items() if con >= _need]
-            if _ung:
-                _pick = int(st.get("auto_channel_pick") or 0)
-                _map_ok = st.get("auto_channel_map") == int(map_chung)
-                if not (_pick and _map_ok and _pick in _bang and _bang[_pick][1] >= _need):
-                    _pick = min(_ung)[1]
-                    with st["lock"]:
-                        st["auto_channel_map"] = int(map_chung)
-                        st["auto_channel_pick"] = _pick
-                dich = _pick
-                _vi_sao = ("AUTO: quanh bai co %d team, chon phan khu vang nhat du %d cho"
-                           % (_so_team_quanh, _need))
-        else:
-            dich = int(getattr(leader, "current_channel", 0) or 0)
-            _vi_sao = "AUTO: xung quanh duoi 2 team nen giu phan khu leader"
     if not dich:
         dich = int(getattr(leader, "current_channel", 0) or 0)
         _vi_sao = "phân khu hiện tại của leader; không chọn theo dân số"

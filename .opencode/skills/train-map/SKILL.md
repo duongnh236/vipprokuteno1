@@ -38,6 +38,7 @@ skill `farm-di-gioi`.
 | Phân khu đầy / retry | `workflows/train.py::_train_retry_leader_channel`, `_train_fallback_full_channel` |
 | Đổi map ⇒ bỏ ghim kênh | `workflows/train.py::_train_adopt_map_channel` |
 | Member mở nhận lời mời | `workflows/train.py::_open_route_member_invites` |
+| Mời **user ngoài** (tab Điều Khiển) | `agent_bridge.set_external_invite_json` → `run_party_digioi.py::_cho_user_ngoai_vao_party` (hook trong `_do_manual_route`, trước khi kéo ra bãi) |
 | Gom lại do lệch kênh | `workflows/channel_regroup.py::request/tick` |
 | Roster party | `workflows/party.py::missing_from_server_roster` |
 
@@ -58,6 +59,9 @@ skill `farm-di-gioi`.
 | `ui_member_recover` / `ui_leader_recover` / `ui_recovery_safe_ready` / `ui_recovery_city_arrived` | phục hồi |
 | `ui_kicked_users` | account bị server kick (không reconnect) |
 | `cmd_gen` | generation lệnh; lệnh mới hủy đường đi generation cũ |
+| `ext_invite_on` / `ext_invite_name` | bật + tên user ngoài (tab Điều Khiển) |
+| `ext_invite_gen` / `ext_invite_gen_done` | phiên mời user ngoài / phiên đã xử lý xong |
+| `ext_invite_started_at` / `ext_invite_status` | mốc bắt đầu (5 phút) / trạng thái (`inviting`/`joined`/`timeout`/`full`) |
 
 ## Quy tắc khi sửa
 
@@ -68,6 +72,9 @@ skill `farm-di-gioi`.
 - Phân khu manual phải áp dụng **ngay tại thành tập kết**, trước khi mời party và kéo ra bãi.
 - Tái dùng battle/heal config đã lưu, **không** ghi đè rule skill / ngưỡng HP/SP khi chuyển luồng.
 - Feature mới → module riêng + entry point riêng (`docs/workflow-architecture.md`).
+- **Mời user ngoài**: chỉ chạy khi `ext_invite_on=True` + có tên. Leader mời người đó khi lập đội
+  (sau khi bot member đủ), chờ **tối đa 5 phút**; vào được thì tiếp tục, hết hạn thì **hủy lệnh** và
+  chạy tiếp. Party đủ **5 người** → bỏ qua. **Không** đụng whitelist/bot member → không va chạm luồng cũ.
 
 ## Kiểm chứng
 

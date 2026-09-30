@@ -43,7 +43,23 @@ metadata:
   - **Legacy** (`battle_tracker.generation == 0`): `_on_actions` (0x35) — arm khi record
     `skill_id=0` ở hàng char/pet.
   - **Tracker** (mặc định): `_prepare_tracker_turn()` gọi ở `turn_start` (0x34) **và** ở sự kiện
-    `status` của 0x35 (arm lại để không phụ thuộc THỨ TỰ gói — xem mục dưới).
+    `status` của 0x35 (arm lại để không phụ thuộc THỨ TỰ gói) — nhưng **CHỈ khi record `skill_id=0`
+    ở ĐÚNG CỘT CỦA MÌNH** (`position[1] == state.my_atype`). 0x35 status-list mang **CẢ 5 người
+    party** (hàng 2/3 = phe ta) nên lọc theo HÀNG là chưa đủ.
+
+## An toàn vòng đời lượt
+
+- Mỗi decision worker của tracker phải chốt khóa bất biến `(generation, turn)` và một snapshot
+  riêng của `available` ngay lúc arm. Không được để worker đọc `tracker.turn` hoặc `available`
+  đang thay đổi trong lúc chạy.
+- Trước **mỗi** lệnh `0x32`, `_send_combat(..., expected_key=...)` phải xác nhận khóa vẫn là lượt
+  hiện tại. Worker cũ chỉ được ghi log rồi thoát; không được gửi lệnh, xóa option hoặc reset state
+  của lượt mới.
+- Với tracker, trạng thái “đã đánh” chỉ được mở lại bởi `turn_start` (`0x34`) của lượt mới. Timer
+  reset cũ không được mở lại cùng một lượt; nếu không, `0x35` tới sớm có thể arm nhầm dưới số
+  lượt cũ.
+- Dị giới solo nhiều pet và party team dùng chung invariant này. Không vá riêng workflow Dị giới;
+  lỗi thuộc vòng đời combat cấp thấp trong `client.py`.
 
 ## Vì sao "vào trận mà KHÔNG đánh"
 
@@ -63,6 +79,14 @@ Bot đứng im dù đã bật AUTO BATTLE khi:
   → trận kẹt, nhìn như "đang chờ lệnh đánh từ pet".
 - `_gate_transit` (đang qua cổng) → hoãn lượt.
 - `_acted_turn` còn True / `_in_battle_end_grace()` (vừa kết trận thật) → bỏ lượt.
+- **Worker cũ bị vô hiệu** (log `bo worker combat CU ...`): xảy ra khi lượt đã đổi giữa lúc arm và
+  lúc worker chạy. Nếu lượt **HIỆN TẠI** chưa ai gửi (`_acted_turn` False), bot **tự re-arm** cho
+  lượt hiện tại (log `TU CHUA luot: worker cu bi vo hieu -> re-arm luot hien tai`). Trước đây chỉ
+  `return` → lượt hiện tại không có worker → đứng im → `LUOT CHAM` / đợi hết giờ.
+- **Party có NGƯỜI NGOÀI (user thật vừa được mời)**: tín hiệu "tới lượt" (`0x35` skill_id=0) của
+  người ngoài CŨNG ở hàng 2/3. Nếu arm chỉ lọc theo HÀNG, bot gửi lệnh SỚM (chưa tới lượt mình) →
+  server từ chối → bot không gửi lại → **trận đợi hết giờ mới đánh**. Đã lọc thêm theo CỘT
+  (`position[1] == my_atype`) — xem log `BATTLE ARM qua 0x35 'toi luot'`.
 
 `combat_ready()` **thoát ngay (no-op)** nếu `_auto_battle_enabled` là False → workflow Train/Daily/DG
 **không** tự bật đánh.
@@ -98,4 +122,5 @@ Bot đứng im dù đã bật AUTO BATTLE khi:
 python3 -B -m unittest discover -s tests -q -p 'test_android_safety.py'
 ```
 Test liên quan: `test_independent_daily_and_walk_combat`,
-`test_selected_pet_wins_across_all_workflows_with_default_fallback`.
+`test_selected_pet_wins_across_all_workflows_with_default_fallback`,
+`test_combat_worker_is_pinned_to_generation_and_turn_for_solo_and_team`.

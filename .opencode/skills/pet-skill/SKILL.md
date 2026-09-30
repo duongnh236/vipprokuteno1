@@ -51,6 +51,10 @@ use_digioi_ho_phu, auto_buy_bao_hop)`:
 - **Không đổi pet giữa trận**; không đổi sang pet không mang theo; pet mới vào hồi full HP/SP.
 - Đặc kỹ pet chỉ dùng khi đã mở (`pet_special_skill[pid]`) và có data.
 - Điều phối: 1 heal/lượt (con SP cao nhất); nhiều target chết → nhiều caster hồi sinh.
+- **Hỗ trợ trong trận CHỈ ở luồng EVENT**: `state.support_combat` (mặc định `False`) gate toàn bộ
+  hồi sinh/CC/buff bảo vệ/heal/hồi SP trong `decide_char`/`decide_pet`/`_custom_decision`.
+  `run_party_digioi.run_account` đặt `support_combat = (mode == "event")` → **FARM (train/city/
+  digioi) chỉ đánh thuần** (nhanh tối đa, không barrier); **40NPC/2K** mới hồi máu/hồi sinh/CC.
 
 ## Kiểm chứng
 

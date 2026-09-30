@@ -6530,13 +6530,22 @@ class GameClient:
                 # FALLBACK (khong phai duong chinh): 0x35 bao "toi luot" (record skill_id=0 o hang
                 # char/pet) - giong tin hieu legacy `_on_actions`. CHI arm khi `turn_start` (0x34)
                 # CHUA dung duoc option (`available` rong, vd 0x34 toi truoc khi tracker co du don
-                # vi). KHONG arm lai moi goi 0x35: `_arm_decision` huy+re-lich moi lan -> lenh danh
-                # bi DEBOUNCE cho het burst 0x35 cua ca party -> GUI CHAM.
+                # vi).
+                #
+                # LOC THEO COT CUA MINH (`position[1] == my_atype`): 0x35 status-list mang CA 5
+                # NGUOI trong party (hang 2/3 = phe ta). Truoc day CHI loc theo HANG -> tin hieu
+                # "toi luot" cua NGUOI KHAC (vd user NGOAI vua duoc moi vao party) kich hoat bot
+                # gui lenh SOM (chua toi luot minh) -> server tu choi -> bot khong gui lai -> tran
+                # phai doi HET GIO moi danh. Loc theo cot thi chi tin hieu CUA CHINH MINH moi arm.
                 if (self.auto_combat and not getattr(self, "_acted_turn", False)
                         and not self.available
                         and getattr(event, "skill_id", None) == 0
                         and getattr(event, "position", None)
-                        and event.position[0] in (config.UNIT_CHAR, config.UNIT_PET)):
+                        and event.position[0] in (config.UNIT_CHAR, config.UNIT_PET)
+                        and event.position[1] == getattr(self.state, "my_atype", None)):
+                    log.info("[%s] BATTLE ARM qua 0x35 'toi luot' (cot=%s) g=%d t=%d",
+                             self._label, event.position[1], self.battle_tracker.generation,
+                             self.battle_tracker.turn)
                     self._prepare_tracker_turn()
             elif event.kind == "end":
                 self._metrics_battle_end()
@@ -6676,6 +6685,17 @@ class GameClient:
         if not self._is_current_combat_turn(expected_key):
             log.info("[%s] bo worker combat CU expected=%s current=%s",
                      self._label, expected_key, self._combat_turn_key())
+            # TU CHUA: worker CU bi vo hieu vi LUOT DA DOI, nhung luot HIEN TAI chua ai gui lenh
+            # (`_acted_turn` False). Truoc day chi `return` -> luot hien tai khong co worker nao
+            # -> bot dung im -> `LUOT CHAM` / phai doi het gio. Xay ra khi server day 0x34
+            # (turn_start) nhieu lan / doi luot nhanh (vd party co NGUOI NGOAI) -> arm cu bi huy
+            # lien tuc. Re-arm cho luot hien tai (doc lai tu tracker).
+            if (self.auto_combat and not getattr(self, "_acted_turn", False)
+                    and not self._in_battle_end_grace() and not self._gate_transit
+                    and getattr(self.battle_tracker, "active", False)):
+                log.info("[%s] TU CHUA luot: worker cu bi vo hieu -> re-arm luot hien tai",
+                         self._label)
+                self._prepare_tracker_turn()
             return
         if (expected_key is not None and self._acted_turn_key == expected_key) or (
                 expected_key is None and self._acted_turn):

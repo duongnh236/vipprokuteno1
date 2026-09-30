@@ -18,7 +18,7 @@ Kênh (phân khu) **thuộc từng map**; leader chốt kênh, cả party chuy�
 | UI | `AccountManagerView.java::renderLeaderChannelPolicy` (đọc `channel_options`, `channel_auto/manual`) |
 | Gửi lệnh đổi kênh | `client.py::switch_channel` (`0x07 0200 + channel u16`), lock 1 lệnh/lúc |
 | Ack / danh sách | `client.py::_on_channel_switch_result` / `_on_channel_list` (`0x07 0100`) |
-| Điều phối chốt + thi hành | `run_party_digioi.py::_dieu_phoi_chot_kenh`, `_dieu_phoi_thi_hanh_kenh`, `do_channel_sync` |
+| Điều phối chốt + thi hành | `run_party_digioi.py::_dieu_phoi_chot_kenh`, `_chot_kenh_auto_vang`, `_dieu_phoi_thi_hanh_kenh`, `do_channel_sync` |
 | Qua cổng ⇒ bỏ ghim kênh | `workflows/train.py::_train_adopt_map_channel` |
 | Kênh đầy (retry / fallback) | `workflows/train.py::_train_retry_leader_channel`, `_train_fallback_full_channel` |
 | Gom lại do lệch kênh | `workflows/channel_regroup.py::request/tick` (owner: `workflows/channel.py`) |
@@ -44,6 +44,13 @@ Kênh (phân khu) **thuộc từng map**; leader chốt kênh, cả party chuy�
 - Chỉ chọn **kênh vàng khi ĐÃ tới bãi train**, không đổi ngay lúc tick.
 - Kênh đầy mã 4 / không tồn tại mã 2 → retry/fallback; **tất cả kênh đầy** → giữ đích, chờ chỗ.
 - AUTO chọn kênh đã **tắt toàn cục** (`pick_best_channel` return 0) — chính sách đến từ UI.
+- **Checkbox AUTO phân khu vàng** (`train_channel_auto`): chỉ chọn kênh khi **đã tới bãi train**
+  (`ui_train_phase=="farming"`), cả team **cùng 1 kênh**, và leader thấy **>=2 đội khác** quanh bãi
+  (`nearby_other_team_count`). Chọn kênh **ít người nhất còn đủ chỗ cho cả team** (xấu nhất: không
+  kênh nào vắng → vẫn lấy kênh ít người nhất). Đổi qua flow an toàn
+  `party_switch_channel(..., keep_auto=True)` (safe → tan PT → đổi → lập lại → ra lại bãi). Logic:
+  `_chot_kenh_auto_vang`, phải chạy **TRƯỚC** nhánh `len(dem)<=1` và nhánh manual — trước đây nằm
+  sau nên tich auto mà không bao giờ đổi khu (bug 28/09).
 
 ## Kiểm chứng
 
@@ -52,6 +59,7 @@ python3 -B -m unittest discover -s tests -q -p 'test_channel_regroup.py'
 python3 -B -m unittest discover -s tests -q -p 'test_android_safety.py'
 ```
 Test: `test_channel_policy_never_ranks_population`, `test_farming_channel_change_queues_safe_flow_not_direct_switch`,
+`test_auto_channel_decision_is_reachable_when_party_together`, `test_auto_golden_channel_only_at_farm_with_two_teams`,
 `test_full_channel_fallback_requires_fresh_capacity_for_entire_team`,
 `test_train_channel_full_requests_safe_regroup_without_relogin`,
 `test_farm_map_replaces_city_pin_without_leaving_party`.

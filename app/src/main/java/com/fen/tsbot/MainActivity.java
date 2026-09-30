@@ -33,6 +33,8 @@ public class MainActivity extends Activity {
     private Spinner serverSpinner, trainGroupSpinner, mapSpinner, modeSpinner, digioiLevelSpinner, digioiModeSpinner, farmPointSpinner; private EditText farmX, farmY; private TextView status, selectionInfo,dailyStatus,updateStatus; private Button dailyStop,updateButton,startFarmButton;
     private SharedPreferences trainPrefs; private boolean restoringTrainSelection=false;
     private Button switchLeaderButton,loginAllButton,logoutAllButton,npc40Button,partyStatsButton;
+    // MỜI USER NGOÀI vào party (control tab). Trước đây chỉ có Python/bridge, thiếu UI nên không thấy.
+    private EditText extInviteName;
     private boolean loginAllPending=false,loginAllAcknowledged=false,logoutAllPending=false;
     private View configView; private TeamMapView teamMapView; private AccountManagerView accountManagerView; private FrameLayout pageHost;
     private final Button[] accountNavButtons=new Button[5]; private Button controlNavButton; private int currentPage=0,selectedAccount=0; private JSONArray bottomAccounts=new JSONArray();
@@ -46,7 +48,7 @@ public class MainActivity extends Activity {
     // (do chinh la ly do "dung vat pham rat cham"). Queue rieng; sau khi xong goi `bag_json` nhe de
     // cap nhat lai so luong cho UI thay vi quet lai ca 5 account.
     private final ThreadPoolExecutor actionIo = new ThreadPoolExecutor(1,1,0L,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(16),new ThreadPoolExecutor.AbortPolicy());
-    private final Runnable poll = new Runnable() { public void run() { if(!io.isShutdown()&&io.getQueue().isEmpty()){refreshStatus();refreshAccountsDashboard();refreshDailyStatus();}handler.postDelayed(this,2500); } };
+    private final Runnable poll = new Runnable() { public void run() { if(!io.isShutdown()&&io.getQueue().isEmpty()){refreshStatus();refreshAccountsDashboard();refreshDailyStatus();refreshUiNotices();}handler.postDelayed(this,2500); } };
     private volatile boolean mapRefreshPending=false;
     // Map co executor RIENG: dashboard poll 2.5s rat nang (5 account + tui do + skill...) va truoc
     // day dung chung 1 luong voi map 1s -> map bi doi, gan nhu khong cap nhat. Queue ngan + bo nhip
@@ -70,7 +72,7 @@ public class MainActivity extends Activity {
         io.execute(this::loadCatalog);
     }
 
-    private View buildTabbedUi(){LinearLayout app=column();app.setBackgroundColor(BG);pageHost=new FrameLayout(this);configView=buildUi();teamMapView=new TeamMapView(this);accountManagerView=new AccountManagerView(this);accountManagerView.setAccountActionListener(new AccountManagerView.AccountActionListener(){public void onLogin(int slot,String user,String pass){startOne(slot,user,pass);}public void onAutoBattle(int slot,String user,String pass){autoBattleOne(slot,user,pass);}public void onLogout(int slot,String user){stopOne(slot,user);}public void onTeleport(int slot,String user,int cityId){teleportOne(slot,user,cityId);}public void onCombatSettings(int slot,String user,int petId,int charSkill,int petSkill,int hpPercent,int spPercent,boolean usePhucThan,boolean useDaiPhucThan,int charMobMin,int petMobMin,int petHpPercent,int petSpPercent,boolean useDgHoPhu,boolean autoBuyBaoHop){applyCombatSettings(slot,user,petId,charSkill,petSkill,hpPercent,spPercent,usePhucThan,useDaiPhucThan,charMobMin,petMobMin,petHpPercent,petSpPercent,useDgHoPhu,autoBuyBaoHop);}public void onAccountAction(String user,String action,JSONObject payload){runAccountAction(user,action,payload);}public void onChannelPolicy(boolean autoMode,int channel){applyChannelPolicy(autoMode,channel);}public void onMapTap(int x,int y){moveTeamFromMap(x,y);}public void onAutoMode(int slot,String user,String mode){setAutoMode(slot,user,mode);}});teamMapView.setOnMapTapListener(this::moveTeamFromMap);pageHost.addView(configView,new FrameLayout.LayoutParams(-1,-1));pageHost.addView(teamMapView,new FrameLayout.LayoutParams(-1,-1));pageHost.addView(accountManagerView,new FrameLayout.LayoutParams(-1,-1));teamMapView.setVisibility(View.GONE);accountManagerView.setVisibility(View.GONE);app.addView(pageHost,new LinearLayout.LayoutParams(-1,0,1));app.addView(buildBottomNav(),new LinearLayout.LayoutParams(-1,-2));return app;}
+    private View buildTabbedUi(){LinearLayout app=column();app.setBackgroundColor(BG);pageHost=new FrameLayout(this);configView=buildUi();teamMapView=new TeamMapView(this);accountManagerView=new AccountManagerView(this);accountManagerView.setAccountActionListener(new AccountManagerView.AccountActionListener(){public void onLogin(int slot,String user,String pass){startOne(slot,user,pass);}public void onAutoBattle(int slot,String user,String pass){autoBattleOne(slot,user,pass);}public void onLogout(int slot,String user){stopOne(slot,user);}public void onTeleport(int slot,String user,int cityId){teleportOne(slot,user,cityId);}public void onCombatSettings(int slot,String user,int petId,int charSkill,int petSkill,int hpPercent,int spPercent,boolean usePhucThan,boolean useDaiPhucThan,int charMobMin,int petMobMin,int petHpPercent,int petSpPercent,boolean useDgHoPhu,boolean autoBuyBaoHop){applyCombatSettings(slot,user,petId,charSkill,petSkill,hpPercent,spPercent,usePhucThan,useDaiPhucThan,charMobMin,petMobMin,petHpPercent,petSpPercent,useDgHoPhu,autoBuyBaoHop);}public void onAccountAction(String user,String action,JSONObject payload){runAccountAction(user,action,payload);}public void onChannelPolicy(boolean autoMode,int channel){applyChannelPolicy(autoMode,channel);}public void onEventChannelPolicy(boolean autoMode,int channel){applyEventChannelPolicy(autoMode,channel);}public void onMapTap(int x,int y){moveTeamFromMap(x,y);}public void onAutoMode(int slot,String user,String mode){setAutoMode(slot,user,mode);}});teamMapView.setOnMapTapListener(this::moveTeamFromMap);pageHost.addView(configView,new FrameLayout.LayoutParams(-1,-1));pageHost.addView(teamMapView,new FrameLayout.LayoutParams(-1,-1));pageHost.addView(accountManagerView,new FrameLayout.LayoutParams(-1,-1));teamMapView.setVisibility(View.GONE);accountManagerView.setVisibility(View.GONE);app.addView(pageHost,new LinearLayout.LayoutParams(-1,0,1));app.addView(buildBottomNav(),new LinearLayout.LayoutParams(-1,-2));return app;}
     private View buildBottomNav(){HorizontalScrollView scroll=new HorizontalScrollView(this);scroll.setFillViewport(true);scroll.setClipToPadding(false);scroll.setBackgroundColor(Color.rgb(5,12,22));LinearLayout nav=row();nav.setPadding(dp(6),dp(7),dp(6),dp(20));for(int i=0;i<5;i++){final int slot=i;accountNavButtons[i]=button("○ ACC "+(i+1),Color.rgb(25,35,49),Color.WHITE);accountNavButtons[i].setOnClickListener(v->showAccountPage(slot));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(dp(96),dp(62));lp.setMargins(dp(2),0,dp(2),0);nav.addView(accountNavButtons[i],lp);}controlNavButton=button("⚙ ĐIỀU KHIỂN",GOLD,Color.rgb(20,20,20));controlNavButton.setOnClickListener(v->showPage(0));LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(dp(142),dp(62));cp.setMargins(dp(3),0,dp(3),0);nav.addView(controlNavButton,cp);scroll.addView(nav);updateBottomNav();return scroll;}
     private void showPage(int page){currentPage=page;configView.setVisibility(page==0?View.VISIBLE:View.GONE);teamMapView.setVisibility(page==1?View.VISIBLE:View.GONE);accountManagerView.setVisibility(page==2?View.VISIBLE:View.GONE);updateBottomNav();updateTeamActionButtons();if(page==1)refreshMapSnapshot();if(page==2)refreshAccountsDashboard();}
     private void showAccountPage(int slot){selectedAccount=slot;accountManagerView.selectAccount(slot);showPage(2);}
@@ -94,6 +96,13 @@ public class MainActivity extends Activity {
         root.addView(section("CẤU HÌNH PARTY"));
         switchLeaderButton=button("👑 ĐỔI LEADER ONLINE",Color.rgb(145,100,30),Color.WHITE);switchLeaderButton.setOnClickListener(v->showLeaderSwitchDialog());root.addView(switchLeaderButton,matchWrap());
         npc40Button=button("🏹  40 NPC",Color.rgb(150,92,42),Color.WHITE);npc40Button.setOnClickListener(v->showNpc40Dialog());root.addView(npc40Button,matchWrap());
+        root.addView(section("MỜI NGƯỜI NGOÀI VÀO PARTY"));
+        extInviteName=input("Tên user ngoài (đúng tên trong game)",false);root.addView(extInviteName,matchWrap());
+        LinearLayout extInviteRow=row();
+        Button extInviteApply=button("✓  ÁP DỤNG MỜI NGOÀI",Color.rgb(38,145,92),Color.WHITE);extInviteApply.setOnClickListener(v->applyExternalInvite(true));
+        Button extInviteOff=button("✕  TẮT MỜI NGOÀI",Color.rgb(150,60,66),Color.WHITE);extInviteOff.setOnClickListener(v->applyExternalInvite(false));
+        extInviteRow.addView(extInviteApply,weight());extInviteRow.addView(extInviteOff,weight());
+        root.addView(extInviteRow,matchWrap());
         partyStatsButton=button("📊  AGI & CẤP TEAM (combo)",Color.rgb(58,104,148),Color.WHITE);partyStatsButton.setOnClickListener(v->showPartyStats());root.addView(partyStatsButton,matchWrap());
         serverSpinner = spinner(); modeSpinner = spinner(); digioiLevelSpinner=spinner(); digioiModeSpinner=spinner(); trainGroupSpinner=spinner(); mapSpinner = spinner(); farmPointSpinner=spinner();
         modeSpinner.setAdapter(adapter(Arrays.asList("Train theo map", "Đứng yên", "Dị giới + farm")));
@@ -376,6 +385,23 @@ private void showLeaderSwitchDialog(){List<String> names=new ArrayList<>(),ids=n
         });}catch(java.util.concurrent.RejectedExecutionException e){accountManagerView.finishBagAction(user,null,false);Toast.makeText(this,"Hệ thống đang bận, thử lại sau",Toast.LENGTH_SHORT).show();}
     }
     private void applyChannelPolicy(boolean autoMode,int channel){io.execute(()->{try{JSONObject r=new JSONObject(Python.getInstance().getModule("agent_bridge").callAttr("set_train_channel_policy_json",autoMode,channel).toString());runOnUiThread(()->{accountManagerView.setChannelPolicyResult(r.optBoolean("ok"),autoMode,channel,r.optString("message"));Toast.makeText(this,r.optString("message"),Toast.LENGTH_LONG).show();});}catch(Exception e){runOnUiThread(()->accountManagerView.setChannelPolicyResult(false,autoMode,channel,"Lỗi cấu hình phân khu: "+e.getMessage()));}});}
+    private void applyEventChannelPolicy(boolean autoMode,int channel){io.execute(()->{try{JSONObject r=new JSONObject(Python.getInstance().getModule("agent_bridge").callAttr("set_event_channel_policy_json",autoMode,channel).toString());runOnUiThread(()->{accountManagerView.setEventChannelPolicyResult(r.optBoolean("ok"),autoMode,channel,r.optString("message"));Toast.makeText(this,r.optString("message"),Toast.LENGTH_LONG).show();});}catch(Exception e){runOnUiThread(()->accountManagerView.setEventChannelPolicyResult(false,autoMode,channel,"Lỗi cấu hình phân khu 40NPC: "+e.getMessage()));}});}
+    private void applyExternalInvite(boolean on) {
+        final String name = extInviteName == null ? "" : extInviteName.getText().toString().trim();
+        if (on && name.isEmpty()) { Toast.makeText(this, "Hãy nhập tên user ngoài", Toast.LENGTH_LONG).show(); return; }
+        io.execute(() -> {
+            try {
+                JSONObject r = new JSONObject(Python.getInstance().getModule("agent_bridge")
+                        .callAttr("set_external_invite_json", on, on ? name : "").toString());
+                runOnUiThread(() -> Toast.makeText(this, r.optString("message"), Toast.LENGTH_LONG).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "Lỗi mời người ngoài: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+    // Toast tu luong tu dong (vd phan khu 40NPC MANUAL khong du cho) - Android poll moi 2.5s.
+    private volatile long lastUiNoticeSeq=0;
+    private void refreshUiNotices(){io.execute(()->{try{JSONObject r=new JSONObject(Python.getInstance().getModule("agent_bridge").callAttr("poll_ui_notices_json",lastUiNoticeSeq).toString());JSONArray ns=r.optJSONArray("notices");lastUiNoticeSeq=r.optLong("seq",lastUiNoticeSeq);if(ns==null||ns.length()==0)return;for(int i=0;i<ns.length();i++){JSONObject n=ns.optJSONObject(i);if(n==null)continue;String m=n.optString("message","");if(!m.isEmpty())runOnUiThread(()->Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show());}}catch(Exception ignored){}});}
 
     private void updateFarmPoints(){
         if(maps.isEmpty()||mapSpinner.getSelectedItemPosition()<0)return;

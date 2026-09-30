@@ -109,6 +109,11 @@ class BattleState:
         # CO LEADER thi khong ai ep, phai nho auto-latch (>6 quai). Tran mo ra <=6 quai la chay
         # nguyen TRAIN mode ca tran -> chi dung AoE RE NHAT (Hoa Tien/Nem Da) du quai rat dong.
         self.force_quest_mode = False
+        # BUOC HO TRO TRONG TRAN (hoi sinh / CC / buff bao ve / heal HP / hoi SP) CHI bat o
+        # luong EVENT (40NPC/2K - set trong run_party_digioi.run_account khi mode == "event").
+        # Luong FARM (train/city/digioi) de False -> combat.decide_char/decide_pet CHI danh thuan:
+        # khong goi barrier dong bo, khong ton cong -> ra lenh danh nhanh toi da (yeu cau user).
+        self.support_combat = False
         self._battle_counted = False   # latch: da dem so quai luc start tran chua
         # DEM THE HE du lieu quai: tang moi lan CO goi 0x33 THAT cap nhat nhom quai (saw_enemy_group).
         # Goi 0x35 (offer luot) KHONG mang du lieu quai -> neu 0x35 den ma KHONG co 0x33 moi kem theo

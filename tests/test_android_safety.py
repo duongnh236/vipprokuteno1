@@ -100,12 +100,199 @@ class SafetyTests(unittest.TestCase):
         c = SimpleNamespace(current_map=23803, current_channel=11, switch_channel=Mock())
         st = {"cmd": ("train",), "ui_train_phase": "farming", "train_channel_map": 23803}
         self.assertEqual(fn(0, st, [("leader", c)], 2), 0)
-        safe.assert_called_once_with(0, 2)
+        safe.assert_called_once_with(0, 2, keep_auto=False)
         c.switch_channel.assert_not_called()
         safe.reset_mock()
         st["cmd"] = ("channel", 2)
         self.assertEqual(fn(0, st, [("leader", c)], 2), 0)
         safe.assert_not_called()
+        # AUTO phan khu vang: giu co auto khi doi khu (khong tat auto).
+        safe.reset_mock()
+        st["cmd"] = ("train",)
+        st["train_channel_auto"] = True
+        self.assertEqual(fn(0, st, [("leader", c)], 2), 0)
+        safe.assert_called_once_with(0, 2, keep_auto=True)
+
+    def test_auto_channel_decision_is_reachable_when_party_together(self):
+        # Bug cu: nhanh auto nam SAU `if len(dem) <= 1: return` VA bi nhanh manual `return` chan
+        # -> tich auto ma khong bao gio doi khu. Nay auto phai chay TRUOC ca hai.
+        src = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        a = src.index("def _dieu_phoi_chot_kenh(")
+        nxt = src.find("\ndef ", a + 1)
+        block = src[a:] if nxt == -1 else src[a:nxt]
+        self.assertIn("if _manual > 0 and not _auto:", block)
+        self.assertIn("_chot_kenh_auto_vang(pidx, st, song, dem, map_chung, leader)", block)
+        self.assertLess(block.index("_chot_kenh_auto_vang(pidx"),
+                        block.index("if len(dem) <= 1:"))
+
+    def test_auto_golden_channel_only_at_farm_with_two_teams(self):
+        # Checkbox 'tu chon phan khu vang': chi doi khu khi DA o bai train (farming), ca team CUNG
+        # 1 kenh, leader thay >= 2 doi quanh bai; chon kenh IT NGUOI NHAT con du cho ca team.
+        leader2 = SimpleNamespace(nearby_other_team_count=lambda: 2)
+        leader1 = SimpleNamespace(nearby_other_team_count=lambda: 1)
+        bang = {"bang": {1: (4, 9), 2: (1, 9), 5: (2, 9)}}
+        ns = {"log": logging.getLogger("test"),
+              "_map_train_dich": lambda pidx, st: 23803,
+              "_lam_moi_ds_kenh": lambda *a: None,
+              "_bang_kenh": lambda song, map_id=None: bang["bang"]}
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_auto_vang", ns)
+        base = {"lock": threading.RLock(), "train_channel_auto": True,
+                "ui_train_phase": "farming", "ui_train_target": (23803, 550, 590)}
+        team = [("l", leader2)] * 5
+        # Auto TAT -> khong lam gi.
+        self.assertIsNone(fn(0, dict(base, train_channel_auto=False), team, {1: 5}, 23803, leader2))
+        # Chua toi bai train -> khong doi khu.
+        self.assertIsNone(fn(0, dict(base, ui_train_phase="gather"), team, {1: 5}, 23803, leader2))
+        # Quanh bai < 2 doi -> giu nguyen khu.
+        self.assertIsNone(fn(0, base, team, {1: 5}, 23803, leader1))
+        # >=2 doi, party cung kenh -> chon kenh it nguoi nhat du cho (kenh 2: 1 nguoi).
+        st = dict(base)
+        self.assertEqual(fn(0, st, team, {1: 5}, 23803, leader2), 2)
+        self.assertEqual(st["auto_channel_pick"], 2)
+        # Da o dung kenh vang do -> khong doi (tranh ping-pong).
+        self.assertIsNone(fn(0, st, team, {2: 5}, 23803, leader2))
+        # Khong kenh nao du cho ca team -> thoi (cho nhip sau).
+        bang["bang"] = {1: (9, 1)}
+        self.assertIsNone(fn(0, dict(base), team, {1: 5}, 23803, leader2))
+
+    def test_external_invite_policy_gates_input_and_bumps_generation(self):
+        # Checkbox + textfield user ngoai: bat ma khong co ten -> loi (khong bat); doi thiet lap ->
+        # tang `gen` de phien moi; tat -> khong lam gi.
+        st = {"lock": threading.RLock()}
+        runner = SimpleNamespace(_pstate=lambda _i: st)
+        ns = {"json": json, "log": logging.getLogger("test"), "_get_runner": lambda: runner}
+        fn = function("agent_bridge.py", "set_external_invite_json", ns)
+        self.assertFalse(json.loads(fn(True, ""))["ok"])
+        self.assertFalse(st.get("ext_invite_on", False))
+        r = json.loads(fn(True, "  nguoichoi  "))
+        self.assertTrue(r["ok"])
+        self.assertTrue(st["ext_invite_on"])
+        self.assertEqual(st["ext_invite_name"], "nguoichoi")
+        gen1 = st["ext_invite_gen"]
+        fn(True, "khac")
+        self.assertGreater(st["ext_invite_gen"], gen1)
+        fn(False, "")
+        self.assertFalse(st["ext_invite_on"])
+        self.assertEqual(st["ext_invite_status"], "idle")
+
+    def test_external_invite_waits_then_gives_up(self):
+        # Leader moi user ngoai toi da 5 phut: da vao -> xong; party du 5 -> bo qua; het 5 phut ->
+        # huy lenh; tat -> khong lam gi.
+        now = time.time()
+        ent = b"ABCDEFGH"
+
+        class C:
+            running = True
+            party_members = []
+            entity_names = {ent: {"nguoichoi"}}
+
+            def _entity_is_visible_on_current_scene(self, e):
+                return True, ""
+
+            def invite_entity(self, e):
+                self.invited = True
+
+        def base_st(**kw):
+            d = {"lock": threading.RLock(), "cmd_gen": 1, "reform_gen": 0,
+                 "ext_invite_on": True, "ext_invite_name": "nguoichoi",
+                 "ext_invite_gen": 1, "ext_invite_gen_done": -1,
+                 "ext_invite_started_at": now, "ext_invite_last_at": now,
+                 "ext_invite_status": "idle"}
+            d.update(kw)
+            return d
+
+        ns = {"time": SimpleNamespace(time=time.time, sleep=lambda _s: None),
+              "log": logging.getLogger("test"),
+              "EXT_INVITE_TIMEOUT_SEC": 300.0, "EXT_INVITE_GAP_SEC": 5.0, "PARTY_MAX_MEMBERS": 5,
+              "_tim_entity_theo_ten": lambda c, n: ent,
+              "_ext_invite_finish": lambda st, g, label, name, status, msg: st.update(
+                  {"ext_invite_status": status, "ext_invite_gen_done": g})}
+        fn = function("train_bot/run_party_digioi.py", "_cho_user_ngoai_vao_party", ns)
+        # Da vao party -> xong ngay.
+        st = base_st()
+        c = C(); c.party_members = [ent]
+        self.assertTrue(fn(c, st, 0, "L", gen=1, stopped=lambda: False))
+        self.assertEqual(st["ext_invite_status"], "joined")
+        # Party da du 5 nguoi -> khong con cho.
+        st2 = base_st()
+        c2 = C(); c2.party_members = [b"1", b"2", b"3", b"4"]
+        self.assertTrue(fn(c2, st2, 0, "L", gen=1, stopped=lambda: False))
+        self.assertEqual(st2["ext_invite_status"], "full")
+        # Het 5 phut chua vao -> huy lenh, chay tiep flow.
+        st3 = base_st(ext_invite_started_at=now - 301.0)
+        self.assertTrue(fn(C(), st3, 0, "L", gen=1, stopped=lambda: False))
+        self.assertEqual(st3["ext_invite_status"], "timeout")
+
+        # Thay entity nhung KHONG co co `nearby` -> VAN moi (ten chi dinh ro), roi bi ngat.
+        class C2(C):
+            def _entity_is_visible_on_current_scene(self, e):
+                return False, "chua thay quanh leader"
+
+        c4 = C2(); c4.invited = False
+        seen = {"n": 0}
+
+        def stopped():
+            seen["n"] += 1
+            return seen["n"] > 1
+
+        self.assertFalse(fn(c4, base_st(ext_invite_last_at=now - 10.0), 0, "L", gen=1,
+                             stopped=stopped))
+        self.assertTrue(c4.invited)
+
+        # Tat -> khong lam gi.
+        self.assertTrue(fn(C(), base_st(ext_invite_on=False), 0, "L", gen=1,
+                             stopped=lambda: False))
+
+    def test_external_invite_hooked_into_leader_party_gather(self):
+        src = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn("def _cho_user_ngoai_vao_party(", src)
+        self.assertIn("_cho_user_ngoai_vao_party(", src)
+        self.assertIn("gen=gen, stopped=_stopped", src)
+        self.assertIn("def set_external_invite_json(", (ROOT / "agent_bridge.py").read_text())
+        java = (Path(__file__).resolve().parents[1]
+                / "app/src/main/java/com/fen/tsbot/MainActivity.java").read_text()
+        self.assertIn("set_external_invite_json", java)
+        self.assertIn("extInviteName", java)
+        # Da BO checkbox theo yeu cau user: ap dung/tat bang NUT, khong con checkbox.
+        self.assertNotIn("extInviteCheck", java)
+
+    def test_ext_invite_session_reset_reinvites_each_login(self):
+        # Sau logout ALL + login lai, leader phai MOI LAI user ngoai (khong bo qua vi gen_done cu).
+        st = {"lock": threading.RLock(), "ext_invite_on": True, "ext_invite_name": "nguoichoi",
+              "ext_invite_gen": 3, "ext_invite_gen_done": 3,
+              "ext_invite_started_at": 123.0, "ext_invite_last_at": 456.0,
+              "ext_invite_status": "timeout"}
+        ns = {}
+        fn = function("train_bot/run_party_digioi.py", "_ext_invite_session_reset", ns)
+        fn(st)
+        self.assertEqual(st["ext_invite_gen_done"], -1)
+        self.assertEqual(st["ext_invite_started_at"], 0.0)
+        self.assertEqual(st["ext_invite_last_at"], 0.0)
+        self.assertEqual(st["ext_invite_status"], "waiting")
+        # Tat -> khong dung gi.
+        off = {"lock": threading.RLock(), "ext_invite_on": False, "ext_invite_name": "",
+               "ext_invite_gen_done": 9}
+        fn(off)
+        self.assertEqual(off["ext_invite_gen_done"], 9)
+
+    def test_ext_invite_counts_external_user_in_expected(self):
+        ab = (ROOT / "agent_bridge.py").read_text()
+        self.assertIn("expected_total = len(configured) + (1 if ext_invite_on else 0)", ab)
+        self.assertIn('"party_expected": int(expected_total)', ab)
+
+    def test_channel_change_refarms_party_and_returns_to_farm_spot(self):
+        # Sau khi doi phan khu (AUTO vang / manual): phai LAP LAI party (gom ca user ngoai neu bat)
+        # roi KEO CA DOI RA LAI BAI. Truoc day: thieu user ngoai + dung im o safe.
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        a = rp.index("def _party_tai_cho_xu_ly(")
+        b = rp.index("def _start_training(", a)
+        block = rp[a:b]
+        self.assertIn("nonlocal training_started", block)
+        self.assertIn("_cho_user_ngoai_vao_party(c, st, pidx, label", block)
+        self.assertIn("training_started = False", block)
+        c0 = rp.index('if kind == "channel":')
+        c1 = rp.index('elif kind == "city":', c0)
+        self.assertIn("training_started = False", rp[c0:c1])
 
     def test_farm_map_replaces_city_pin_without_leaving_party(self):
         fn = function("train_bot/run_party_digioi.py", "_train_adopt_map_channel", {})
@@ -281,6 +468,7 @@ class SafetyTests(unittest.TestCase):
                   "log": logging.getLogger("test"), "_resolve_train_safe": lambda *args: None,
                   "set_account_activity": Mock(), "joined_member_count": lambda _: 0,  # Simulate stale local ACK count.
                   "reset_party_joined": Mock(), "_invite_whitelist_followers_if_bot_party_ready": Mock(),
+                  "_cho_user_ngoai_vao_party": Mock(return_value=True),
                   "_resync_ck": Mock(), "READY_WAIT_REFORM_SEC": 5,
                   "_route_mismatch_timed_out": lambda *args, **kwargs: False}
         for name in ("_workflow_leave_current_area", "_open_route_member_invites", "_train_retry_leader_channel", "_train_fallback_full_channel", "_train_adopt_map_channel", "_farm_party_missing"):
@@ -310,6 +498,8 @@ class SafetyTests(unittest.TestCase):
         self.assertFalse(any(t.is_alive() for t in threads), "train deadlock")
         self.assertEqual(errors, [])
         self.assertEqual(st["ui_train_phase"], "farming")
+        # Hook moi user ngoai phai duoc goi trong luong train cua leader (truoc khi keo ra bai).
+        self.assertTrue(shared["_cho_user_ngoai_vao_party"].called)
         for c in clients.values():
             c.go_to_town.assert_called_once()
             self.assertEqual(c.go_to_town.call_args.args[0], 23001)
@@ -505,6 +695,7 @@ class SafetyTests(unittest.TestCase):
         config = SimpleNamespace(PARTY_CONFIG={0: {}}, PARTY_LEADER_ACC={0: "leader"})
         ns = {"config": config, "_mode_can_lap_doi": lambda _: True,
               "_party_40npc_ngoai_gio": lambda *args: False,
+              "_event_channel_policy_active": lambda *args: False,
               "time": time, "log": logging.getLogger("test")}
         fn = function("train_bot/run_party_digioi.py", "_dieu_phoi_chot_kenh", ns)
         clients = [("leader", SimpleNamespace(current_map=12001, current_channel=3)),
@@ -718,6 +909,159 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("elif not coordinator.mark_sent(", block)
         self.assertIn("tracker.register_action(source, d.skill", block)
 
+    def test_support_actions_are_event_only_and_farm_stays_attack_only(self):
+        # Yeu cau user: hoi sinh/CC/buff bao ve/heal/hoi SP CHI chay o luong EVENT (40NPC/2K).
+        # Luong FARM (train/city/digioi) dat support_combat=False -> combat chi danh thuan:
+        # khong barrier dong bo -> ra lenh nhanh toi da.
+        st = (ROOT / "train_bot/state.py").read_text()
+        self.assertIn("self.support_combat = False", st)
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn('c.state.support_combat = (mode == "event")', rp)
+        cb = (ROOT / "train_bot/combat.py").read_text()
+        # Cac block ho tro khong con bi comment: da bat lai CO GATE (truoc day comment het ->
+        # mat han hoi sinh/heal ca o event).
+        self.assertNotIn("# rv = _try_revive(state, config.UNIT_CHAR", cb)
+        self.assertNotIn("# rv = _try_revive(state, config.UNIT_PET", cb)
+        # Ca 3 diem quyet dinh deu phai gate bang flag truoc khi lam bat ky buoc ho tro nao.
+        for name in ("def _custom_decision(", "def decide_char(", "def decide_pet("):
+            a = cb.index(name)
+            nxt = cb.find("\ndef ", a + 1)
+            block = cb[a:] if nxt == -1 else cb[a:nxt]
+            self.assertIn('if getattr(state, "support_combat", False):', block)
+
+    def test_register_current_unit_is_noop_when_support_off(self):
+        # FARM (support_combat=False): khong dang ky _support_reg/_revive_reg -> khong ton cong
+        # moi luot + khong bom rac vao 2 dict module-global khong bao gio duoc don.
+        calls = []
+        ns = {"_hang_cua": lambda _s, _u: 3,
+              "register_support_skills": lambda *a: calls.append(a)}
+        fn = function("train_bot/combat.py", "_register_current_unit", ns)
+        fn(SimpleNamespace(self_slot=0, party_idx=0, support_combat=False), 3, [1])
+        self.assertEqual(calls, [])
+        fn(SimpleNamespace(self_slot=0, party_idx=0, support_combat=True), 3, [1])
+        self.assertEqual(len(calls), 1)
+
+    def test_event_channel_policy_roundtrip(self):
+        st = {"lock": threading.RLock()}
+        runner = SimpleNamespace(
+            _pstate=lambda _i: st,
+            party_accounts=lambda _i: [("leader", "p", True, None), ("m1", "p", False, None)])
+        c = SimpleNamespace(current_map=10991, current_channel=1, running=True, _username="leader")
+        rows = [{"id": 7, "current": 2, "capacity": 6, "free": 4}]
+        ns = {"json": json, "log": logging.getLogger("test"), "time": time,
+              "_get_runner": lambda: runner,
+              "_live_party": lambda r: [("leader", c)],
+              "_channel_rows_for_map": lambda cl, force=False, wait=False: list(rows)}
+        fn = function("agent_bridge.py", "set_event_channel_policy_json", ns)
+        r = json.loads(fn(True, 0))
+        self.assertTrue(r["ok"])
+        self.assertTrue(st["event_channel_auto"])
+        r = json.loads(fn(False, 7))
+        self.assertTrue(r["ok"])
+        self.assertFalse(st["event_channel_auto"])
+        self.assertEqual(st["event_channel_manual"], 7)
+        rows[0]["free"] = 1   # can 2 thanh vien, con 1 -> khong du
+        r = json.loads(fn(False, 7))
+        self.assertFalse(r["ok"])
+        self.assertIn("không đủ", r["message"])
+        r = json.loads(fn(False, 99))   # khu khong ton tai
+        self.assertFalse(r["ok"])
+        self.assertIn("không có", r["message"])
+
+    def _event_picker_ns(self, bang, sentinel):
+        return {
+            "_K40_NA": sentinel, "time": time, "log": logging.getLogger("test"),
+            "config": SimpleNamespace(PARTY_CONFIG={0: {"mode": "event", "event_key": "npc_40"}}),
+            "_event_channel_policy_active": lambda pidx, st: True,
+            "_ev_cua_party": lambda pcfg: {"dest_map": 10991},
+            "_lam_moi_ds_kenh": lambda *a: None,
+            "_bang_kenh": lambda song, mid=None: dict(bang),
+            "_doc_ket_qua_doi_kenh": lambda song: (set(), False, False),
+            "_bao_khong_du_cho_40npc": Mock(),
+        }
+
+    def test_event_channel_picker_auto_picks_emptiest(self):
+        sentinel = object()
+        st = {"lock": threading.RLock(), "event_channel_auto": True, "event_channel_manual": 0,
+              "event_channel_pick": 0, "event_channel_map": 0, "event_channel_status": ""}
+        c = SimpleNamespace(current_map=10991, current_channel=1,
+                            switch_channel=Mock(return_value=True))
+        bang = {1: (10, 5), 2: (2, 10), 3: (0, 1)}   # can 5: khu 3 khong du -> chon khu 2 (it nguoi)
+        ns = self._event_picker_ns(bang, sentinel)
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
+        pick = fn(0, st, [("leader", c)], 5, "leader", c)
+        self.assertEqual(pick, 2)
+        c.switch_channel.assert_called_once_with(2, theo_lenh=True)
+        ns["_bao_khong_du_cho_40npc"].assert_not_called()
+
+    def test_event_channel_picker_counts_external_user(self):
+        # Yeu cau: khu chon phai du cho CA bot LAN user ngoai (khi bat AP DUNG MOI NGOAI).
+        sentinel = object()
+        st = {"lock": threading.RLock(), "event_channel_auto": True, "event_channel_manual": 0,
+              "event_channel_pick": 0, "event_channel_map": 0, "event_channel_status": "",
+              "ext_invite_on": True, "ext_invite_name": "nguoichoi"}
+        c = SimpleNamespace(current_map=10991, current_channel=1,
+                            switch_channel=Mock(return_value=True))
+        # 2 bot + 1 nguoi ngoai = can 3: khu 1 (con 2) KHONG du, khu 2 (con 3) DU -> chon khu 2.
+        bang = {1: (0, 2), 2: (0, 3)}
+        ns = self._event_picker_ns(bang, sentinel)
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
+        pick = fn(0, st, [("leader", c)], 2, "leader", c)
+        self.assertEqual(pick, 2)
+
+    def test_event_gather_invites_external_user(self):
+        # 40NPC: sau khi du bot, leader phai MOI USER NGOAI (neu bat) truoc khi vao su kien.
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        a = rp.index("DU PARTY (%d/%d member join)")
+        b = rp.index("def _start_training(", a)
+        block = rp[a:b]
+        self.assertIn("if event_party_mode:", block)
+        self.assertIn("_cho_user_ngoai_vao_party(c, st, pidx, label", block)
+
+    def test_event_channel_picker_manual_rejects_when_not_enough(self):
+        sentinel = object()
+        st = {"lock": threading.RLock(), "event_channel_auto": False, "event_channel_manual": 7,
+              "event_channel_pick": 0, "event_channel_map": 0, "event_channel_status": ""}
+        c = SimpleNamespace(current_map=10991, current_channel=1,
+                            switch_channel=Mock(return_value=True))
+        ns = self._event_picker_ns({7: (9, 1)}, sentinel)   # khu 7 chi con 1 cho, can 5
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
+        pick = fn(0, st, [("leader", c)], 5, "leader", c)
+        self.assertIsNone(pick)
+        ns["_bao_khong_du_cho_40npc"].assert_called_once()
+        c.switch_channel.assert_not_called()
+
+    def test_ui_notice_queue(self):
+        from train_bot import ui_notice
+        ui_notice.clear()
+        ui_notice.push("a")
+        seq = ui_notice.push("b")
+        data = ui_notice.poll(0)
+        self.assertEqual([n["message"] for n in data["notices"]], ["a", "b"])
+        self.assertEqual(data["seq"], seq)
+        self.assertEqual(ui_notice.poll(seq)["notices"], [])
+        ui_notice.clear()
+
+    def test_event_channel_ui_wired(self):
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn('"event_channel_auto": False', rp)
+        self.assertIn('"event_channel_manual": 0', rp)
+        self.assertIn("def _chot_kenh_40npc(", rp)
+        self.assertIn("def _bao_khong_du_cho_40npc(", rp)
+        self.assertIn("def _event_channel_policy_active(", rp)
+        ab = (ROOT / "agent_bridge.py").read_text()
+        self.assertIn("def set_event_channel_policy_json(", ab)
+        self.assertIn("def poll_ui_notices_json(", ab)
+        base = Path(__file__).resolve().parents[1] / "app/src/main/java/com/fen/tsbot"
+        amv = (base / "AccountManagerView.java").read_text()
+        self.assertIn("renderLeaderEventChannelPolicy", amv)
+        self.assertIn("refreshOpenChannelDropdowns", amv)
+        self.assertIn("onEventChannelPolicy", amv)
+        ma = (base / "MainActivity.java").read_text()
+        self.assertIn("set_event_channel_policy_json", ma)
+        self.assertIn("refreshUiNotices", ma)
+        self.assertIn("poll_ui_notices_json", ma)
+
     def test_tracker_battle_arms_on_0x35_offer_not_only_turn_start(self):
         # Tracker path phai arm o CA su kien `status` cua 0x35 (giong legacy `_on_actions`),
         # khong chi o `turn_start` (0x34) -> tranh "vao tran khong danh" khi 0x34 toi truoc
@@ -736,6 +1080,30 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("KHONG co option", source)
         # Do do tre gui lenh (arm -> send) trong log SEND.
         self.assertIn("_arm_first_at", source)
+
+    def test_battle_arm_from_0x35_only_for_own_column(self):
+        # 0x35 status-list mang CA 5 NGUOI trong party (hang 2/3 = phe ta). Neu CHI loc theo HANG,
+        # tin hieu "toi luot" cua NGUOI KHAC (vd user ngoai vua duoc moi vao party) se arm bot SOM
+        # -> bot gui lenh chua toi luot -> server tu choi -> khong gui lai -> tran doi HET GIO.
+        # Phai loc them theo COT CUA MINH (`position[1] == my_atype`).
+        source = (ROOT / "train_bot/client.py").read_text()
+        a = source.index("def _track_battle_packet(")
+        b = source.index("def _prepare_tracker_turn(", a)
+        block = source[a:b]
+        self.assertIn('event.position[0] in (config.UNIT_CHAR, config.UNIT_PET)', block)
+        self.assertIn('event.position[1] == getattr(self.state, "my_atype", None)', block)
+
+    def test_stale_combat_worker_self_heals_current_turn(self):
+        # Worker cua luot CU bi vo hieu nhung luot HIEN TAI chua gui -> phai RE-ARM, khong duoc bo.
+        # Truoc day chi `return` -> luot hien tai khong co worker nao -> bot dung im -> LUOT CHAM /
+        # phai doi het gio (gap khi party co user ngoai / server doi luot nhanh).
+        source = (ROOT / "train_bot/client.py").read_text()
+        a = source.index("def _make_decisions(")
+        b = source.index("def _send_combat(", a)
+        block = source[a:b]
+        self.assertIn("bo worker combat CU", block)
+        self.assertIn("TU CHUA luot: worker cu bi vo hieu -> re-arm luot hien tai", block)
+        self.assertIn("self._prepare_tracker_turn()", block)
 
     def test_combat_worker_is_pinned_to_generation_and_turn_for_solo_and_team(self):
         # Worker cua turn cu KHONG duoc gui/clear/reset state turn moi. Guard nay dung chung cho

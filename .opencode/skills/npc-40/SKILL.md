@@ -44,6 +44,9 @@ Chi tiết + lý do từng mốc: `references/loop.md`.
   `npc40.party_song_that(client)` (đọc thẳng từng client cùng party). Bằng chứng thua thật =
   `_npc40_hp_snap` cho thấy quân nhà nằm hết (`_da_thua_that`).
 - Mất kết nối / bấm Stop → `_wait_counter` trả `False` **không phải thua**; đừng báo party tan.
+- **Hỗ trợ trong trận bật sẵn cho event**: `run_party_digioi.run_account` đặt
+  `state.support_combat = (mode == "event")` → 40NPC/2K mới hồi sinh/CC/buff/heal/hồi SP. Luồng
+  farm để `False` (chỉ đánh thuần, nhanh tối đa). Xem `combat.decide_char/decide_pet/_custom_decision`.
 
 ## Điều kiện kết thúc (`npc40._ket_thuc`)
 
