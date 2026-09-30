@@ -127,10 +127,13 @@ class SafetyTests(unittest.TestCase):
 
     def test_auto_golden_channel_only_at_farm_with_two_teams(self):
         # Checkbox 'tu chon phan khu vang': chi doi khu khi DA o bai train (farming), ca team CUNG
-        # 1 kenh, leader thay >= 2 doi quanh bai; chon kenh IT NGUOI NHAT con du cho ca team.
+        # 1 kenh, leader thay >= 2 doi quanh bai; chon kenh it NGUOI KHAC nhat con du cho ca team.
+        # LUU Y: `dang_o` trong bang DA tinh ca acc cua chinh team -> kenh hien tai toi thieu bang
+        # `len(team)`; xep hang theo `dang_o - phan_cua_minh` (so nguoi khac).
         leader2 = SimpleNamespace(nearby_other_team_count=lambda: 2)
         leader1 = SimpleNamespace(nearby_other_team_count=lambda: 1)
-        bang = {"bang": {1: (4, 9), 2: (1, 9), 5: (2, 9)}}
+        # Team (5) dang o kenh 1 (bang ghi 7 nguoi -> 2 nguoi khac); kenh 2 co 1 nguoi (vang hon).
+        bang = {"bang": {1: (7, 9), 2: (1, 9), 5: (2, 9)}}
         ns = {"log": logging.getLogger("test"),
               "_map_train_dich": lambda pidx, st: 23803,
               "_lam_moi_ds_kenh": lambda *a: None,
@@ -145,22 +148,24 @@ class SafetyTests(unittest.TestCase):
         self.assertIsNone(fn(0, dict(base, ui_train_phase="gather"), team, {1: 5}, 23803, leader2))
         # Quanh bai < 2 doi -> giu nguyen khu.
         self.assertIsNone(fn(0, base, team, {1: 5}, 23803, leader1))
-        # >=2 doi, party cung kenh -> chon kenh it nguoi nhat du cho (kenh 2: 1 nguoi).
+        # >=2 doi, party cung kenh -> chon kenh it NGUOI KHAC nhat du cho (kenh 2: 1 nguoi khac).
         st = dict(base)
         self.assertEqual(fn(0, st, team, {1: 5}, 23803, leader2), 2)
         self.assertEqual(st["auto_channel_pick"], 2)
-        # Da o dung kenh vang do -> khong doi (tranh ping-pong).
-        self.assertIsNone(fn(0, st, team, {2: 5}, 23803, leader2))
-        # Khong kenh nao du cho ca team -> thoi (cho nhip sau).
-        bang["bang"] = {1: (9, 1)}
+        # Kenh minh dang o da la vang nhat -> GIU NGUYEN, khong nhay (chong ping-pong).
+        bang["bang"] = {1: (7, 9), 2: (9, 9), 5: (2, 9)}
         self.assertIsNone(fn(0, dict(base), team, {1: 5}, 23803, leader2))
+        # Da o dung kenh vang do -> khong doi.
+        bang["bang"] = {2: (6, 9), 5: (2, 9)}
+        self.assertIsNone(fn(0, dict(base), team, {2: 5}, 23803, leader2))
 
-    def test_auto_channel_counts_own_team_occupancy(self):
-        # Kenh MINH DANG O: `dang_o` tu bang server DA tinh ca 5 acc cua chinh team -> truoc day
-        # `con >= need` luon false -> picker doi sang kenh khac roi lap lai vo tan (nhao kenh mai,
-        # party lap di lap lai, khong ra bai farm). Phai CONG lai phan cua minh truoc khi so.
-        leader2 = SimpleNamespace(nearby_other_team_count=lambda: 2)
-        bang = {"bang": {5: (5, 3), 9: (7, 3)}}
+    def test_auto_picker_keeps_current_channel_when_capacity_unknown(self):
+        # LOI THAT (log 01/10): server KHONG liet ke kenh minh dang o -> client luu `(None, None)` ->
+        # `_bang_kenh` bo no ra khoi bang -> picker tuong kenh hien tai "khong du cho" -> doi sang
+        # kenh khac; doi xong kenh cu lai thanh "vang nhat" -> NHAY KENH 4<->9 VO TAN. Phai GIU
+        # NGUYEN khi kenh hien tai khong co so (chua ro suc chua).
+        leader2 = SimpleNamespace(nearby_other_team_count=lambda: 3)
+        bang = {"bang": {4: (2, 6), 7: (3, 5)}}      # thieu kenh 9 (minh dang o)
         ns = {"log": logging.getLogger("test"),
               "_map_train_dich": lambda pidx, st: 23803,
               "_lam_moi_ds_kenh": lambda *a: None,
@@ -168,10 +173,10 @@ class SafetyTests(unittest.TestCase):
         fn = function("train_bot/run_party_digioi.py", "_chot_kenh_auto_vang", ns)
         st = {"lock": threading.RLock(), "train_channel_auto": True,
               "ui_train_phase": "farming", "ui_train_target": (23803, 550, 590),
-              "auto_channel_pick": 5, "auto_channel_map": 23803}
+              "auto_channel_pick": 9, "auto_channel_map": 23803}
         team = [("l", leader2)] * 5
-        # Ca team dang o kenh 5 (con 3 cho do CHINH 5 acc chiem) -> du cho, KHONG doi khu.
-        self.assertIsNone(fn(0, st, team, {5: 5}, 23803, leader2))
+        self.assertIsNone(fn(0, st, team, {9: 5}, 23803, leader2))
+        self.assertEqual(st["auto_channel_pick"], 9)
 
     def test_channel_cmd_unlocked_after_all_accounts_done(self):
         # `cmd=("channel", ch)` phai duoc tra ve lenh train (hoac xoa) khi CA party xu ly xong; neu
@@ -180,6 +185,15 @@ class SafetyTests(unittest.TestCase):
         rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
         self.assertIn("def _mark_channel_cmd_done(", rp)
         self.assertIn("_mark_channel_cmd_done(pidx, st, username)", rp)
+
+    def test_gui_train_leader_goes_back_to_spot_after_regroup(self):
+        # GUI START TRAIN: nhanh legacy (`VIEC_RA_QUAI`) bi TAT khi co `ui_train_target`
+        # (`_legacy_party_train_enabled` -> False), nen phai co nhanh RIENG keo ca doi ra lai diem
+        # quai sau khi doi phan khu / lap lai PT. Thieu no: ca doi dung im o safe ma van "farming"
+        # (loi user 30/09-01/10).
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn("GUI-TRAIN: du doi + cung map/kenh nhung con o", rp)
+        self.assertIn("KEO CA DOI RA BAI", rp)
 
     def test_external_invite_policy_gates_input_and_bumps_generation(self):
         # Checkbox + textfield user ngoai: bat ma khong co ten -> loi (khong bat); doi thiet lap ->

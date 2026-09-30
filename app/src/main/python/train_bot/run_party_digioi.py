@@ -8961,6 +8961,27 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                             except Exception as e:
                                 log.warning("[%s] (LEADER) moi user ngoai loi (bo qua): %s", label, e)
                             training_started = False
+            # GUI START TRAIN (`ui_train_target`): nhanh legacy ngay duoi bi TAT
+            # (`_legacy_party_train_enabled` tra False) -> sau khi doi phan khu / lap lai PT, KHONG ai
+            # keo ca doi ra lai bai: ca doi dung im o safe ma `ui_train_phase` van "farming" (loi user
+            # 30/09-01/10). Bo sung DUNG viec con thieu: party DU + cung map/kenh + dang o map train +
+            # con o safe -> leader KEO CA DOI RA LAI DIEM QUAI.
+            if (is_leader and train_on_map and st.get("ui_train_target")
+                    and st.get("ui_train_phase") == "farming"
+                    and c.current_map == sc
+                    and joined_member_count(pidx) >= st["n_members"]
+                    and not c.in_combat() and not getattr(c, "flee_mode", False)):
+                _kh_now = _ke_hoach(st) or {}
+                _spot_now = st.get("mob_spot")
+                if (_kh_now.get("viec") in (None, VIEC_LAM, VIEC_DI_TRAIN, VIEC_RA_QUAI)
+                        and _spot_now and _xa_diem_quai(c.pos, _spot_now)):
+                    log.warning("[%s] (LEADER) GUI-TRAIN: du doi + cung map/kenh nhung con o %s "
+                                "(diem quai %s) -> KEO CA DOI RA BAI", label, c.pos, _spot_now)
+                    try:
+                        training_started = _danh_dau_training(
+                            st, bool(_start_training(ep_ra_spot=True)))
+                    except Exception as e:
+                        log.warning("[%s] GUI-TRAIN: loi keo ra bai: %s", label, e)
             # --- RETRY KENH + RE-MOI moi 60s (ca DG lan map-train) ---
             # Kenh it nguoi nhat co the KHONG du cho ca party -> co dua ket lai kenh cu.
             # Leader cu train; dua chua join thi 1p chuyen lai kenh chung 1 lan; leader 1p moi lai.
@@ -12289,31 +12310,45 @@ def _chot_kenh_auto_vang(pidx, st, song, dem, map_chung, leader):
     except Exception:
         _bang = {}
     _need = max(1, len(song))
-    # `_bang` (tu S:007-001) co `dang_o` DA TINH CA acc CUA CHINH PARTY dang o kenh do. Phai CONG
-    # lai phan cua minh (`dem[ch]`) truoc khi so "con du cho ca team": neu khong, kenh MINH DANG O
-    # luon bi tinh la thieu cho (chinh minh chiem mat `len(song)` slot) -> picker bo sang kenh khac
-    # roi lai thay kenh do thieu -> NHAY KENH VO TAN, party lap di lap lai, khong bao gio ra lai bai
-    # farm (log 30/09: "chon phan khu 12" lien tuc trong khi ca team dang o 10).
+    # KENH MINH DANG O ma bang khong co so (`(None, None)`): server KHONG liet ke kenh minh dung
+    # (thuong vi no day), `client._on_channel_list` them vao voi suc chua KHONG BIET, va `_bang_kenh`
+    # BO cac kenh (None,None) di -> kenh hien tai khong co trong `_bang`. KHONG the ket luan no thieu
+    # cho -> GIU NGUYEN (dung quy tac client da chot: chua ro suc chua thi giu kenh dang dung).
+    # Thieu buoc nay: picker tuong "minh dang o kenh khong du cho" -> chon kenh khac; doi xong kenh cu
+    # lai thanh "vang nhat" -> NHAY KENH 4<->9 VO TAN, party lap di lap lai, khong ra bai (log 01/10).
+    if len(dem) == 1:
+        _cur_ch = int(next(iter(dem)))
+        if _cur_ch and _cur_ch not in _bang:
+            with st["lock"]:
+                st["auto_channel_map"] = int(map_chung)
+                st["auto_channel_pick"] = _cur_ch
+            return None
+    # `_bang` co `dang_o` DA TINH CA acc CUA CHINH PARTY. Xep hang theo SO NGUOI KHAC (`dang_o -
+    # phan_cua_minh`) chu khong theo `dang_o`: neu khong, kenh minh dang o luon "trong nhat" sau khi
+    # minh roi di -> cu nhay qua nhay lai. `others` bo phan cua minh ra nen so sanh ON DINH.
     def _du_cho(_ch):
         try:
             _dang, _con = _bang[_ch]
             return int(_con) + int(dem.get(int(_ch), 0)) >= _need
         except Exception:
             return False
-    _ung = [(int(_d), int(_ch)) for _ch, (_d, _con) in _bang.items() if _du_cho(int(_ch))]
+    def _others(_ch):
+        _dang, _con = _bang[_ch]
+        return int(_dang) - int(dem.get(int(_ch), 0))
+    _ung = [(_others(int(_ch)), int(_ch)) for _ch in _bang if _du_cho(int(_ch))]
     if not _ung:
         return None                       # khong kenh nao du cho ca team -> cho nhip sau
-    _pick = int(st.get("auto_channel_pick") or 0)
-    _map_ok = st.get("auto_channel_map") == int(map_chung)
-    if not (_pick and _map_ok and _pick in _bang and _du_cho(_pick)):
-        _pick = min(_ung)[1]              # it nguoi nhat trong so du cho
-        with st["lock"]:
-            st["auto_channel_map"] = int(map_chung)
-            st["auto_channel_pick"] = _pick
+    _cur = int(next(iter(dem))) if len(dem) == 1 else 0
+    # It nguoi khac nhat; hoa -> uu tien KENH DANG O (tranh nhay vo ich khi bang nhau), roi id nho hon.
+    _ung.sort(key=lambda t: (t[0], 0 if t[1] == _cur else 1, t[1]))
+    _pick = _ung[0][1]
+    with st["lock"]:
+        st["auto_channel_map"] = int(map_chung)
+        st["auto_channel_pick"] = int(_pick)
     if _pick in dem:
         return None                       # dang o dung khu vang do roi -> khong doi
     log.info("[party %d] DIEU PHOI AUTO: quanh bai %d doi (>=2) -> chon phan khu %d "
-             "(it nguoi nhat du %d cho; hien tai %s)", pidx + 1, _so_team_quanh, _pick,
+             "(it nguoi khac nhat du %d cho; hien tai %s)", pidx + 1, _so_team_quanh, _pick,
              _need, dict(sorted(dem.items())))
     return _pick
 
