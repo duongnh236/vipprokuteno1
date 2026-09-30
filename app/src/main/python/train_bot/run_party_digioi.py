@@ -4852,6 +4852,9 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
             if is_leader:
                 c.leave_party()                  # GIAI TAN party cu (neu co) -> member duoc tha
                 reset_party_joined(pidx)
+                # Huy PT de gom lai -> nguoi NGOAI bi bo ra khoi doi. Mo lai phien moi de MOI LAI
+                # (thieu dong nay: `ext_invite_gen_done == gen` -> bo qua im lang).
+                _ext_invite_session_reset(st)
             if fc:
                 # CHI ve thanh gom nhau. KHONG lam boss/dungeon o day nua (truoc day lam MOI VONG
                 # reform cho ca member -> churn teleport + keo dai reform -> member de MAT KET NOI
@@ -5516,6 +5519,9 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 c.leave_party()          # giai tan party cu de lap lai (van dung o bai train)
                 reset_party_joined(pidx)
                 st["invited"].clear()
+                # Huy PT de lap lai -> nguoi NGOAI bi bo ra. Mo lai phien moi de MOI LAI (xem
+                # `_ext_invite_session_reset`); thieu dong nay leader chi pt cac bot tai cho.
+                _ext_invite_session_reset(st)
             # DOC LAI tinh hinh: so kenh o tren duoc doc TRUOC khi cho ca party ra rally, ma vong
             # cho do keo dai hang chuc giay - trong lung do moi nguoi doi kenh xong het. Dung so cu
             # la di nham nhanh "lech kenh" du ca party DA cung kenh, roi sync kenh lai TU CHON kenh
@@ -6572,15 +6578,17 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 st["invited"].set()
                 log.info("[%s] (LEADER) DU PARTY (%d/%d member join)",
                          label, joined_member_count(pidx), st["n_members"])
-                # 40NPC / event party: GOM CA USER NGOAI vao party (neu nguoi dung da bam AP DUNG
-                # MOI NGOAI) truoc khi vao su kien. Cho toi da 5 phut; `gen_done` chan moi lai
-                # trong cung phien, `_ext_invite_session_reset` mo lai o moi phien login.
-                if event_party_mode:
-                    try:
-                        _cho_user_ngoai_vao_party(c, st, pidx, label,
-                                                  gen=st.get("cmd_gen"), stopped=_stopped)
-                    except Exception as e:
-                        log.warning("[%s] (LEADER) event: moi user ngoai loi (bo qua): %s", label, e)
+                # FARM + 40NPC/event: GOM CA USER NGOAI vao party (neu nguoi dung da bam AP DUNG
+                # MOI NGOAI) truoc khi ra bai / vao su kien. Cho toi da 5 phut; `gen_done` chan moi
+                # lai trong cung phien, `_ext_invite_session_reset` mo lai o moi phien login VA moi
+                # lan huy PT de lap lai (doi kenh/reform).
+                # Truoc day chi `if event_party_mode` -> che do FARM doi phan khu xong chi pt cac bot,
+                # THIEU nguoi ngoai (loi user bao 30/09).
+                try:
+                    _cho_user_ngoai_vao_party(c, st, pidx, label,
+                                              gen=st.get("cmd_gen"), stopped=_stopped)
+                except Exception as e:
+                    log.warning("[%s] (LEADER) moi user ngoai loi (bo qua): %s", label, e)
                 if not train_on_map:
                     _invite_whitelist_followers_if_bot_party_ready(
                         c, st, pidx, label, force=True
@@ -7661,6 +7669,9 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                                 c.leave_party(); reset_party_joined(pidx)
                             except Exception as e:
                                 log.warning("[%s] (LEADER) manual: loi giai tan party: %s", label, e)
+                            # Doi phan khu = huy PT roi lap lai -> nguoi NGOAI bi bo ra. Mo lai phien
+                            # moi de `_cho_user_ngoai_vao_party` MOI LAI nguoi ngoai vao PT moi.
+                            _ext_invite_session_reset(st)
                             time.sleep(2.0)   # cho goi 0x0d sub04 ve de MOI acc resync toa do
                         # Tha member di: het "tu di theo leader", va da co `S:013-004` (kem toa do
                         # that) de sua pos truoc khi ra lenh di.
@@ -7711,6 +7722,9 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                     log.warning("[%s] (%s) manual: doi kenh %d THAT BAI (%d lan thu) -> GIU kenh cu "
                                 "%s, de buoc dong bo kenh gom ca party lai",
                                 label, role, ch, _lan, getattr(c, "current_channel", None))
+                # Xong (thanh cong hay that bai) -> danh dau; khi CA party xong thi tra `cmd` ve lenh
+                # train/xoa, mo lai quyen doi kenh cho dieu phoi (xem `_mark_channel_cmd_done`).
+                _mark_channel_cmd_done(pidx, st, username)
             elif kind == "city":
                 cid, flag = cmd[1], cmd[2]
                 c.flee_mode = True
@@ -12275,12 +12289,23 @@ def _chot_kenh_auto_vang(pidx, st, song, dem, map_chung, leader):
     except Exception:
         _bang = {}
     _need = max(1, len(song))
-    _ung = [(int(_d), int(_ch)) for _ch, (_d, _con) in _bang.items() if int(_con) >= _need]
+    # `_bang` (tu S:007-001) co `dang_o` DA TINH CA acc CUA CHINH PARTY dang o kenh do. Phai CONG
+    # lai phan cua minh (`dem[ch]`) truoc khi so "con du cho ca team": neu khong, kenh MINH DANG O
+    # luon bi tinh la thieu cho (chinh minh chiem mat `len(song)` slot) -> picker bo sang kenh khac
+    # roi lai thay kenh do thieu -> NHAY KENH VO TAN, party lap di lap lai, khong bao gio ra lai bai
+    # farm (log 30/09: "chon phan khu 12" lien tuc trong khi ca team dang o 10).
+    def _du_cho(_ch):
+        try:
+            _dang, _con = _bang[_ch]
+            return int(_con) + int(dem.get(int(_ch), 0)) >= _need
+        except Exception:
+            return False
+    _ung = [(int(_d), int(_ch)) for _ch, (_d, _con) in _bang.items() if _du_cho(int(_ch))]
     if not _ung:
         return None                       # khong kenh nao du cho ca team -> cho nhip sau
     _pick = int(st.get("auto_channel_pick") or 0)
     _map_ok = st.get("auto_channel_map") == int(map_chung)
-    if not (_pick and _map_ok and _pick in _bang and _bang[_pick][1] >= _need):
+    if not (_pick and _map_ok and _pick in _bang and _du_cho(_pick)):
         _pick = min(_ung)[1]              # it nguoi nhat trong so du cho
         with st["lock"]:
             st["auto_channel_map"] = int(map_chung)
@@ -13523,6 +13548,43 @@ def party_set_di_gioi_level(pidx, idx):
              pidx + 1, idx, n)
 
 
+def _mark_channel_cmd_done(pidx, st, username):
+    """1 acc da xu ly xong lenh doi kenh; khi CA party xong -> tra `cmd` ve lenh TRAIN (hoac xoa).
+
+    `party_switch_channel` ghi de `cmd=("channel", ch)` va KHONG ai xoa -> hai cho doc
+    `cmd[0]=="channel"` (`_dieu_phoi_thi_hanh_kenh`, `_nghe_lenh_kenh`) bi khoa VINH VIEN, va
+    `_android_train_recovery_tick` (doi `cmd[0]=="train"`) cung tat. Hau qua (loi user bao 30/09):
+    sau lan doi kenh dau, AUTO phan khu vang chi con chon ma khong doi duoc, recovery train chet,
+    leader ket "dang doi kenh" nen khong ra lai bai farm.
+    Tra ve lenh TRAIN neu dang farm; khong (doi kenh tay giua luc khong train) thi xoa `cmd`.
+    """
+    try:
+        with st["lock"]:
+            if (st.get("cmd") or (None,))[0] != "channel":
+                return
+            gen = int(st.get("cmd_gen", 0) or 0)
+            if st.get("cmd_channel_done_gen") != gen:
+                st["cmd_channel_done_gen"] = gen
+                st["cmd_channel_done"] = set()
+            done = st.setdefault("cmd_channel_done", set())
+            done.add(username)
+            running = set()
+            for _u, _p, _l, _k in party_accounts(pidx):
+                _c = account_clients.get(_u)
+                if _c is not None and getattr(_c, "running", False):
+                    running.add(_u)
+            if not running or not running.issubset(done):
+                return
+            _t = st.get("ui_train_target")
+            st["cmd"] = (("train", 0, int(_t[0]), int(_t[1]), int(_t[2])) if _t else None)
+            st["cmd_channel_done"] = set()
+            log.info("[party %d] DOI KENH: ca party (%d acc) da xu ly xong lenh kenh -> mo khoa lenh "
+                     "kenh (tra cmd ve %s)", pidx + 1, len(running),
+                     "lenh TRAIN" if _t else "None")
+    except Exception:
+        pass
+
+
 def party_switch_channel(pidx, channel, keep_auto=False):
     """GUI ra lenh doi kenh an toan cho ca party.
 
@@ -13551,6 +13613,11 @@ def party_switch_channel(pidx, channel, keep_auto=False):
         st["kenh_dich_luc"] = time.time()
         st["cmd"] = ("channel", channel)
         st["cmd_gen"] += 1
+    # Doi kenh = HUY party roi lap lai -> nguoi NGOAI bi bo ra khoi doi. Mo lai PHIEN moi de lan
+    # lap party tiep theo MOI LAI nguoi ngoai. Thieu dong nay: `ext_invite_gen_done == gen` ->
+    # `_cho_user_ngoai_vao_party` tra True NGAY -> leader chi pt cac bot, THIEU nguoi ngoai
+    # (dung loi user bao 30/09: doi sang phan khu vang xong khong pt nguoi ngoai).
+    _ext_invite_session_reset(st)
     log.info(">>> PARTY %s: lenh DOI KENH -> %d (%s; huy party + ca lu chuyen + tiep tuc che do)",
              pidx + 1, channel, "AUTO phan khu vang" if keep_auto else "manual")
 

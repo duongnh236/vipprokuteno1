@@ -155,6 +155,32 @@ class SafetyTests(unittest.TestCase):
         bang["bang"] = {1: (9, 1)}
         self.assertIsNone(fn(0, dict(base), team, {1: 5}, 23803, leader2))
 
+    def test_auto_channel_counts_own_team_occupancy(self):
+        # Kenh MINH DANG O: `dang_o` tu bang server DA tinh ca 5 acc cua chinh team -> truoc day
+        # `con >= need` luon false -> picker doi sang kenh khac roi lap lai vo tan (nhao kenh mai,
+        # party lap di lap lai, khong ra bai farm). Phai CONG lai phan cua minh truoc khi so.
+        leader2 = SimpleNamespace(nearby_other_team_count=lambda: 2)
+        bang = {"bang": {5: (5, 3), 9: (7, 3)}}
+        ns = {"log": logging.getLogger("test"),
+              "_map_train_dich": lambda pidx, st: 23803,
+              "_lam_moi_ds_kenh": lambda *a: None,
+              "_bang_kenh": lambda song, map_id=None: bang["bang"]}
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_auto_vang", ns)
+        st = {"lock": threading.RLock(), "train_channel_auto": True,
+              "ui_train_phase": "farming", "ui_train_target": (23803, 550, 590),
+              "auto_channel_pick": 5, "auto_channel_map": 23803}
+        team = [("l", leader2)] * 5
+        # Ca team dang o kenh 5 (con 3 cho do CHINH 5 acc chiem) -> du cho, KHONG doi khu.
+        self.assertIsNone(fn(0, st, team, {5: 5}, 23803, leader2))
+
+    def test_channel_cmd_unlocked_after_all_accounts_done(self):
+        # `cmd=("channel", ch)` phai duoc tra ve lenh train (hoac xoa) khi CA party xu ly xong; neu
+        # khong no khoa vinh vien moi lenh kenh sau + tat recovery train -> doi kenh xong khong ra
+        # lai bai farm (loi user bao 30/09).
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn("def _mark_channel_cmd_done(", rp)
+        self.assertIn("_mark_channel_cmd_done(pidx, st, username)", rp)
+
     def test_external_invite_policy_gates_input_and_bumps_generation(self):
         # Checkbox + textfield user ngoai: bat ma khong co ten -> loi (khong bat); doi thiet lap ->
         # tang `gen` de phien moi; tat -> khong lam gi.
@@ -1009,14 +1035,30 @@ class SafetyTests(unittest.TestCase):
         pick = fn(0, st, [("leader", c)], 2, "leader", c)
         self.assertEqual(pick, 2)
 
-    def test_event_gather_invites_external_user(self):
-        # 40NPC: sau khi du bot, leader phai MOI USER NGOAI (neu bat) truoc khi vao su kien.
+    def test_gather_invites_external_user_both_farm_and_event(self):
+        # Sau khi du bot (FARM lan 40NPC), leader phai MOI USER NGOAI (neu bat) truoc khi ra bai/
+        # vao su kien. Truoc day chi gate `if event_party_mode` -> che do FARM doi phan khu xong
+        # chi pt cac bot, THIEU nguoi ngoai (loi user bao 30/09).
         rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
         a = rp.index("DU PARTY (%d/%d member join)")
         b = rp.index("def _start_training(", a)
         block = rp[a:b]
-        self.assertIn("if event_party_mode:", block)
+        self.assertNotIn("if event_party_mode:", block)   # khong con gate theo mode
         self.assertIn("_cho_user_ngoai_vao_party(c, st, pidx, label", block)
+
+    def test_channel_switch_reopens_external_invite_session(self):
+        # Doi phan khu = huy PT roi lap lai -> nguoi NGOAI bi bo ra khoi doi. Phai mo lai PHIEN moi
+        # de `_cho_user_ngoai_vao_party` MOI LAI (khong thi `ext_invite_gen_done == gen` -> bo qua
+        # im lang, leader chi pt cac bot - dung loi user bao 30/09).
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        a = rp.index("def party_switch_channel(")
+        b = rp.index("def party_move_to(", a)
+        self.assertIn("_ext_invite_session_reset(st)", rp[a:b])
+
+    def test_party_reform_reopens_external_invite_session(self):
+        # Cac cho huy PT de lap lai (tai cho / reform / lenh doi kenh tay) cung phai mo lai phien moi.
+        rp = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertGreaterEqual(rp.count("_ext_invite_session_reset(st)"), 4)
 
     def test_event_channel_picker_default_converges_to_leader_channel(self):
         # KHONG bat AUTO, KHONG ghim MANUAL -> phai HOI TU ve kenh hien tai cua leader (keo member
