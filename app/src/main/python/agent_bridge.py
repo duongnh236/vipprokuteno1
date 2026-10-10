@@ -1275,6 +1275,12 @@ def set_train_channel_policy_json(auto_mode=False, channel=0):
                 st["kenh_dich_luc"] = 0.0
                 st["auto_channel_map"] = None
                 st["auto_channel_pick"] = 0
+                # Gop chung voi 40NPC: cung 1 chinh sach -> mirror sang state event cu (UI/picker
+                # doc ca hai, xem `_chot_kenh_40npc`).
+                st["event_channel_auto"] = True
+                st["event_channel_manual"] = 0
+                st["event_channel_pick"] = 0
+                st["event_channel_map"] = 0
             log.info(">>> PHAN KHU: BAT tu chon phan khu vang (se chon khi DA TOI BAI TRAIN)")
             return json.dumps({"ok": True, "channel": 0, "message":
                                "Đã BẬT tự chọn phân khu vắng. Bot sẽ tự chọn khu ít người nhất đủ chỗ cho cả team KHI ĐÃ TỚI BÃI TRAIN (không đổi khu ngay tại chỗ đang đứng)"},
@@ -1289,6 +1295,11 @@ def set_train_channel_policy_json(auto_mode=False, channel=0):
             st["kenh_ghim"] = channel
             st["kenh_dich"] = channel
             st["kenh_dich_luc"] = time.time()
+            # Gop chung voi 40NPC: ghim cung 1 khu.
+            st["event_channel_auto"] = False
+            st["event_channel_manual"] = channel
+            st["event_channel_pick"] = 0
+            st["event_channel_map"] = 0
         current = 0
         live = _live_party(runner)
         if live:
@@ -1332,6 +1343,11 @@ def set_event_channel_policy_json(auto_mode=False, channel=0):
                 st["event_channel_map"] = 0
                 st["event_channel_status"] = "auto"
                 st["event_channel_notice_sig"] = None
+                # Gop chung: cung 1 chinh sach voi phan khu farm.
+                st["train_channel_auto"] = True
+                st["train_channel_manual"] = 0
+                st["auto_channel_map"] = None
+                st["auto_channel_pick"] = 0
             log.info(">>> 40NPC PHAN KHU: BAT tu chon khu vang (chon khi CA TEAM da vao map event)")
             return json.dumps({"ok": True, "auto": True, "channel": 0, "message":
                 "Đã BẬT tự chọn phân khu 40NPC: bot chọn khu ít người nhất ĐỦ CHỖ cho cả team ngay "
@@ -1343,6 +1359,8 @@ def set_event_channel_policy_json(auto_mode=False, channel=0):
                 st["event_channel_pick"] = 0
                 st["event_channel_status"] = ""
                 st["event_channel_notice_sig"] = None
+                st["train_channel_auto"] = False
+                st["train_channel_manual"] = 0
             log.info(">>> 40NPC PHAN KHU: TAT chon phan khu rieng")
             return json.dumps({"ok": True, "auto": False, "channel": 0,
                                "message": "Đã tắt chọn phân khu 40NPC (dùng phân khu hiện tại)"},
@@ -1368,6 +1386,9 @@ def set_event_channel_policy_json(auto_mode=False, channel=0):
             st["event_channel_pick"] = channel
             st["event_channel_status"] = "manual:%d" % channel
             st["event_channel_notice_sig"] = None
+            st["train_channel_auto"] = False
+            st["train_channel_manual"] = channel
+            st["kenh_ghim"] = channel
         log.info(">>> 40NPC PHAN KHU: GHIM khu %d (can %d cho, con %s)", channel, need, free)
         return json.dumps({"ok": True, "auto": False, "channel": channel, "message":
             "Đã GHIM phân khu %d cho 40NPC (còn %s chỗ, cần %d). Cả team sẽ qua khi vào map event."

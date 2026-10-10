@@ -13,6 +13,38 @@ log = logging.getLogger("login")
 import hashlib
 
 
+# APP SECRET cua SDK game goc (`com.vtcmobile.gamesdk`): native lib `libsplay_native_keys.so`
+# tra ve ban ro cua `NativeKeys.getPrivateKey()` = XOR 3 bang 32 byte nhung trong .so. Server giu
+# CUNG gia tri nay de doi chieu `sign`. Doi key nay thi server tra `S:000-000` ma 3 "Chu ky khong
+# hop le" -> khong dang nhap duoc (server doi cach ky tu ~01/10).
+API_PRIVATE_KEY = "f94724205c8bc6d7ba2157c494708fe3"
+SDK_VERSION = "102"
+
+
+def _request_id_local_ms() -> str:
+    """`requestId` giong SDK goc: Calendar.getTimeInMillis() + TimeZone.getDefault().getOffset(now).
+
+    Server KHONG kiem moc thoi gian (da thu requestId=0 van vao duoc) - chi can khop trong chu ky.
+    """
+    now = time.time()
+    try:
+        off = time.altzone if time.localtime(now).tm_isdst and time.daylight else time.timezone
+    except Exception:
+        off = time.timezone
+    return str(int(now * 1000) - int(off) * 1000)
+
+
+def _login_sign(device_id: str, username: str, client_version: str, request_id: str) -> str:
+    """`sign` = MD5(`requestId` + '.' + apiKey + '.' + deviceId + '.' + username + '.' +
+    clientVersion + '.' + sdkVersion + '.' + privateKey) - giong `Utils.getSignDevice` cua SDK goc.
+    """
+    raw = "%s.%s.%s.%s.%s.%s.%s" % (
+        request_id, config.API_KEY, device_id, username,
+        client_version, SDK_VERSION, API_PRIVATE_KEY,
+    )
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
 class LoginError(RuntimeError):
     def __init__(self, data):
         self.data = data or {}
@@ -39,18 +71,25 @@ def login(username: str = None, password: str = None, device_id: str = None) -> 
     password = password or config.PASSWORD
     device_id = device_id or _device_id_for(username)
 
+    client_version = "1.1"
+    request_id = _request_id_local_ms()
     params = {
         "username": username,
         "password": password,
         "device_id": device_id,
         "agency_id": "1",
         "device_os_version": "Samsung SM-A528B 12",
-        "client_version": "1.1",
+        "client_version": client_version,
         "lang": "vi",
         "device_os": "android",
         "local_agency_id": "1",
         "tracking_id": _tracking_id_for(username),
         "carrier": "",
+        # Server moi (tu ~01/10) doi `requestId` + `sign`; thieu/cu -> `error_code 3
+        # "Chu ky khong hop le"` (ke ca khi dung tai khoan/mat khau).
+        "sdk_version": SDK_VERSION,
+        "requestId": request_id,
+        "sign": _login_sign(device_id, username, client_version, request_id),
     }
     body = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(

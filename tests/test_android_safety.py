@@ -1,5 +1,6 @@
 """Dependency-free regression checks for Android orchestration changes."""
 import ast
+import hashlib
 import json
 import logging
 import sys
@@ -40,6 +41,23 @@ class SafetyTests(unittest.TestCase):
         self.assertIn('42: "sua goi chien dau"', source)
         self.assertIn('47: "ket thuc su kien khi tran chua ket thuc"', source)
         self.assertNotIn("frozenset((42, 47, 60))", source)
+
+    def test_login_http_sign_matches_original_sdk(self):
+        # Server moi (tu ~01/10) doi `sign` = MD5(requestId.apiKey.deviceId.username.clientVersion.
+        # 102.privateKey). Thieu -> error_code 3 "Chu ky khong hop le" (ca khi dung acc/mat khau).
+        # privateKey + cong thuc da kiem chung login THAT vao duoc.
+        src = (ROOT / "train_bot/login.py").read_text()
+        self.assertIn('API_PRIVATE_KEY = "f94724205c8bc6d7ba2157c494708fe3"', src)
+        self.assertIn('"sign": _login_sign(', src)
+        self.assertIn('"requestId": request_id', src)
+        ns = {"hashlib": hashlib, "SDK_VERSION": "102",
+              "API_PRIVATE_KEY": "f94724205c8bc6d7ba2157c494708fe3",
+              "config": SimpleNamespace(API_KEY="17ade453e0892461edb01969b6e17e3a")}
+        fn = function("train_bot/login.py", "_login_sign", ns)
+        got = fn("dev_x", "stvtc77", "1.1", "1791559242870")
+        want = hashlib.md5(b"1791559242870.17ade453e0892461edb01969b6e17e3a."
+                           b"dev_x.stvtc77.1.1.102.f94724205c8bc6d7ba2157c494708fe3").hexdigest()
+        self.assertEqual(got, want)
 
     def test_member_catches_up_at_safe_then_leader_picks_up_without_team_restart(self):
         cfg = SimpleNamespace(PARTY_LEADER_ACC={0: "leader"}, TRAIN_MAPS={23803: {"safe": [(230, 310)]}})
@@ -1042,12 +1060,37 @@ class SafetyTests(unittest.TestCase):
               "ext_invite_on": True, "ext_invite_name": "nguoichoi"}
         c = SimpleNamespace(current_map=10991, current_channel=1,
                             switch_channel=Mock(return_value=True))
-        # 2 bot + 1 nguoi ngoai = can 3: khu 1 (con 2) KHONG du, khu 2 (con 3) DU -> chon khu 2.
-        bang = {1: (0, 2), 2: (0, 3)}
+        # 2 bot + 1 nguoi ngoai = can 3: khu 1 suc chua 2 (chi du 2 bot, KHONG du nguoi ngoai) ->
+        # phai chon khu 2 (suc chua 3).
+        bang = {1: (2, 2), 2: (0, 3)}
         ns = self._event_picker_ns(bang, sentinel)
         fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
         pick = fn(0, st, [("leader", c)], 2, "leader", c)
         self.assertEqual(pick, 2)
+
+    def test_channel_policy_merged_40npc_uses_train_state(self):
+        # GOP: `_chot_kenh_40npc` doc state CHUNG `train_channel_auto`/`train_channel_manual`
+        # (khong con phai bat `event_channel_auto` rieng).
+        sentinel = object()
+        st = {"lock": threading.RLock(), "train_channel_auto": True, "train_channel_manual": 0,
+              "event_channel_pick": 0, "event_channel_map": 0, "event_channel_status": ""}
+        c = SimpleNamespace(current_map=10991, current_channel=1, switch_channel=Mock(return_value=True))
+        ns = self._event_picker_ns({1: (5, 10), 4: (0, 10)}, sentinel)
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
+        self.assertEqual(fn(0, st, [("leader", c)], 3, "leader", c), 4)
+
+    def test_event_channel_picker_keeps_committed_channel(self):
+        # Da chot kenh 2 va dang doi ca team qua -> KHONG do lai moi nhip (do lai = doi kenh = member
+        # duoi khong kip -> khong bao gio hoi tu; loi user 08/10). Kenh 3 trong hon nhung phai GIU 2.
+        sentinel = object()
+        st = {"lock": threading.RLock(), "event_channel_auto": True, "event_channel_manual": 0,
+              "event_channel_pick": 2, "event_channel_map": 10991, "event_channel_status": "auto:2"}
+        c = SimpleNamespace(current_map=10991, current_channel=2, switch_channel=Mock(return_value=True))
+        m = SimpleNamespace(current_map=10991, current_channel=5, switch_channel=Mock(return_value=True))
+        ns = self._event_picker_ns({2: (2, 10), 3: (0, 10)}, sentinel)
+        fn = function("train_bot/run_party_digioi.py", "_chot_kenh_40npc", ns)
+        self.assertEqual(fn(0, st, [("leader", c), ("m", m)], 2, "leader", c), 2)
+        c.switch_channel.assert_not_called()
 
     def test_gather_invites_external_user_both_farm_and_event(self):
         # Sau khi du bot (FARM lan 40NPC), leader phai MOI USER NGOAI (neu bat) truoc khi ra bai/
@@ -1160,9 +1203,10 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("def poll_ui_notices_json(", ab)
         base = Path(__file__).resolve().parents[1] / "app/src/main/java/com/fen/tsbot"
         amv = (base / "AccountManagerView.java").read_text()
-        self.assertIn("renderLeaderEventChannelPolicy", amv)
+        # GOP: chi con 1 o chon phan khu (farm + 40NPC), khong con o 40NPC rieng.
+        self.assertIn("CHỌN PHÂN KHU (FARM + 40NPC)", amv)
+        self.assertNotIn("renderLeaderEventChannelPolicy", amv)
         self.assertIn("refreshOpenChannelDropdowns", amv)
-        self.assertIn("onEventChannelPolicy", amv)
         ma = (base / "MainActivity.java").read_text()
         self.assertIn("set_event_channel_policy_json", ma)
         self.assertIn("refreshUiNotices", ma)

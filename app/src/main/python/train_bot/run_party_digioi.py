@@ -12454,33 +12454,63 @@ def _chot_kenh_40npc(pidx, st, song, need, label, c):
         hong = set(_doc_ket_qua_doi_kenh(song)[0])
     except Exception:
         pass
-    auto = bool(st.get("event_channel_auto"))
+    auto = bool(st.get("train_channel_auto") or st.get("event_channel_auto"))
+    manual = int(st.get("train_channel_manual") or st.get("event_channel_manual") or 0)
+    # SO ACC CUA CHINH PARTY dang o tung kenh: bang `S:007-001` da tinh ca chung vao `dang_o`, phai
+    # TRU ra khi so "con du cho" va khi xep hang (giong picker farm). Khong tru -> kenh leader vua
+    # sang bi coi la thieu cho -> picker doi kenh khac -> member duoi khong kip -> KHONG BAO GIO hoi
+    # tu (dung loi user 08/10: "account trong team khong dong bo o phan khu vang du slot").
+    own = {}
+    for _u, _x in song:
+        _ch = int(getattr(_x, "current_channel", 0) or 0)
+        if _ch:
+            own[_ch] = own.get(_ch, 0) + 1
+    def _du_cho(_ch):
+        try:
+            _dang, _con = bang[_ch]
+            return int(_con) + int(own.get(int(_ch), 0)) >= need
+        except Exception:
+            return False
+    def _others(_ch):
+        _dang, _con = bang[_ch]
+        return int(_dang) - int(own.get(int(_ch), 0))
+    _cur = int(getattr(c, "current_channel", 0) or 0)
     _ten = "AUTO" if auto else "MANUAL"
     if auto:
-        ung = [(int(dang), int(ch)) for ch, (dang, con) in bang.items()
-               if int(con) >= need and int(ch) not in hong]
-        if not ung:
-            if time.time() - float(st.get("event_channel_wait_log", 0.0) or 0.0) > 60.0:
-                st["event_channel_wait_log"] = time.time()
-                log.info("[party %d] 40NPC AUTO: chua co phan khu nao du %d cho (bang=%s) -> cho",
-                         pidx + 1, need, dict(sorted(bang.items())))
-            return None
-        pick = min(ung)[1]
+        # GHIM kenh da chot: dang doi ca team qua thi GIU NGUYEN, khong do lai moi nhip (do lai ->
+        # doi kenh -> member duoi khong kip). Chi do lai khi kenh chot het cho / bi server bao day.
+        _committed = int(st.get("event_channel_pick") or 0)
+        _cmap = int(st.get("event_channel_map") or 0)
+        if (_committed and _cmap == int(map_id) and _committed in bang
+                and _du_cho(_committed) and _committed not in hong):
+            pick = _committed
+        else:
+            ung = [(_others(int(ch)), int(ch)) for ch in bang
+                   if _du_cho(int(ch)) and int(ch) not in hong]
+            if not ung:
+                if time.time() - float(st.get("event_channel_wait_log", 0.0) or 0.0) > 60.0:
+                    st["event_channel_wait_log"] = time.time()
+                    log.info("[party %d] 40NPC AUTO: chua co phan khu nao du %d cho (bang=%s) -> cho",
+                             pidx + 1, need, dict(sorted(bang.items())))
+                return None
+            # It nguoi KHAC nhat; hoa -> uu tien kenh dang o, roi id nho hon (khong nhay vo ich).
+            ung.sort(key=lambda t: (t[0], 0 if t[1] == _cur else 1, t[1]))
+            pick = ung[0][1]
     else:
-        pick = int(st.get("event_channel_manual") or 0)
+        pick = manual
         if pick <= 0:
             # KHONG AUTO, KHONG ghim MANUAL -> HOI TU ve KENH HIEN TAI CUA LEADER (keo member dang o
             # kenh khac ve). Truoc day tra `_K40_NA` -> picker cu tra r=0 -> member dung nguyen kenh
             # -> party ket "1 nguoi 1 kenh" (bug user 30/09). Dich la chinh kenh leader dang o nen
             # khong xet suc chua.
-            pick = int(getattr(c, "current_channel", 0) or 0)
+            pick = _cur
             _ten = "hien tai"
             if pick <= 0:
                 return None
         else:
-            info = bang.get(pick)
-            if info is None or int(info[1]) < need:
-                _bao_khong_du_cho_40npc(st, pidx, pick, info, need)
+            info = bang.get(int(pick))
+            if info is None or not _du_cho(int(pick)):
+                _bao_khong_du_cho_40npc(st, pidx, int(pick), info, need)
                 return None
     # DA HOI TU: moi acc dang chay deu cung 1 kenh = `pick` -> khong can doi (tra 0 = giu nguyen).
     try:

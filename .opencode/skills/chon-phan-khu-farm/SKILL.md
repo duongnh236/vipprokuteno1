@@ -32,6 +32,9 @@ Kênh (phân khu) **thuộc từng map**; leader chốt kênh, cả party chuy�
 
 ## Quy tắc / gotcha
 
+- **GỘP với 40NPC (09/10)**: ô chọn phân khu là **DÙNG CHUNG** cho cả farm lẫn 40NPC — state
+  `train_channel_auto`/`train_channel_manual`; `_chot_kenh_40npc` đọc cùng state này. UI bỏ ô
+  "CHỌN PHÂN KHU 40NPC" riêng.
 - **Kênh thuộc 1 map** — mỗi map danh sách kênh khác nhau; **qua cổng phải BỎ ghim kênh**.
 - **Mã kết quả**: `0` OK, `1` trùng kênh, `2` không tồn tại (`沒有該分區`), `3` đang tổ đội, `4` kênh đầy
   (`分區人數已滿`); `-1` = timeout do bot tự đặt.

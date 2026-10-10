@@ -9,7 +9,9 @@ description: Dùng khi làm việc với chọn/chuyển PHÂN KHU (kênh) cho e
 ~49 kênh), khác kênh thành. Vì event rất đông, phải chọn khu **vắng nhất đủ chỗ cho CẢ TEAM** rồi
 đưa cả team qua **cùng lúc**, sau đó leader mới gom PT và chạy luồng 40NPC.
 
-Chính sách này **ĐỘC LẬP** với phân khu farm (`chon-phan-khu-farm`): state riêng, selector riêng.
+Chính sách này đã **GỘP** với phân khu farm (`chon-phan-khu-farm`) từ 09/10: **dùng CHUNG 1 selector UI**
+và state `train_channel_auto`/`train_channel_manual`. Picker 40NPC (`_chot_kenh_40npc`) đọc state
+chung đó (`event_channel_*` chỉ còn là bản mirror cho tương thích, không phải nguồn chính).
 
 ## Điểm vào
 
@@ -17,7 +19,7 @@ Chính sách này **ĐỘC LẬP** với phân khu farm (`chon-phan-khu-farm`): 
 | --- | --- |
 | Bridge chính sách (AUTO / ghim MANUAL) | `agent_bridge.py::set_event_channel_policy_json` |
 | Bridge toast Python → UI | `agent_bridge.py::poll_ui_notices_json` + `train_bot/ui_notice.py` |
-| UI selector | `AccountManagerView.java::renderLeaderEventChannelPolicy` (đọc `event_channel_options`, `event_channel_auto/manual/status`) |
+| UI selector | `AccountManagerView.java::renderLeaderChannelPolicy` — ô "📡 CHỌN PHÂN KHU (FARM + 40NPC)" dùng CHUNG (đọc `channel_options`, `channel_auto/manual`); KHÔNG còn ô 40NPC riêng |
 | Quyết định khu khi đã vào map event | `run_party_digioi.py::_chot_kenh_40npc` (gọi từ picker `do_channel_sync`) |
 | Cờ "đang bật chính sách" | `run_party_digioi.py::_event_channel_policy_active` |
 | Toast khi MANUAL không đủ chỗ | `run_party_digioi.py::_bao_khong_du_cho_40npc` |
@@ -63,6 +65,12 @@ Chính sách này **ĐỘC LẬP** với phân khu farm (`chon-phan-khu-farm`): 
 
 ## Quy tắc / gotcha
 
+- **GỘP với farm (09/10)**: 1 selector chung "📡 CHỌN PHÂN KHU (FARM + 40NPC)"; state chung
+  `train_channel_auto`/`train_channel_manual` (không còn nguồn `event_channel_*` riêng).
+- **Picker phải TRỪ acc của CHÍNH team khỏi `dang_o`** khi tính "đủ chỗ" và khi xếp hạng (xếp theo
+  "số người KHÁC"), VÀ **GHIM kênh đã chốt** (`event_channel_pick`) tới khi cả team hội tụ. Thiếu
+  1 trong 2: leader thấy kênh mình vừa sang "hết chỗ" -> nhảy kênh khác -> member đuổi không kịp ->
+  KHÔNG BAO GIỜ đồng bộ (lỗi user 08/10: "account trong team không đồng bộ ở phân khu vắng đủ slot").
 - **Kênh thuộc từng map**: chỉ chọn sau khi **cả team đã vào map event**; kênh thành vô nghĩa.
 - **Phải rời tổ đội mới đổi khu** (server trả mã 3 `組隊不可換分區`). Vì vậy đổi khu luôn là flow
   "ra safe → rời PT → đổi → gom lại", KHÔNG phải teleport.
