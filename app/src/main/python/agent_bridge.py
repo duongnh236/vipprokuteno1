@@ -338,6 +338,14 @@ _PET_REBORN_EXP_REQUIRED = (
     8120606, 8242413,
 )
 
+# Pet reborn 2: ap dung cong thuc pet da chuyen sinh (turn 2) tren bang TSVTC:
+# trunc(round2(L^3.1)) + 5. Giu index 0 la sentinel nhu
+# bang pet hien co; cac level 1..200 can EXP theo level ke tiep (L + 1).
+_PET_REBORN2_EXP_REQUIRED = (-6,) + tuple(
+    int(round(math.pow(level + 1, 3.1), 2)) + 5
+    for level in range(1, 201)
+)
+
 
 def _build_pet_exp_levels(required_by_level):
     levels = {}
@@ -355,6 +363,7 @@ def _build_pet_exp_levels(required_by_level):
 
 _PET_EXP_LEVELS = _build_pet_exp_levels(_PET_NORMAL_EXP_REQUIRED)
 _PET_REBORN_EXP_LEVELS = _build_pet_exp_levels(_PET_REBORN_EXP_REQUIRED)
+_PET_REBORN2_EXP_LEVELS = _build_pet_exp_levels(_PET_REBORN2_EXP_REQUIRED)
 
 # Hai moc server mobile da doi chieu truc tiep voi UI game. Giu lai base cua
 # server mobile de EXP hien tai tai cap 174/184 khong bi lech voi ban PC cu.
@@ -381,8 +390,13 @@ def _pet_level_exp_values(client):
     values = getattr(client, "pet_exp_values", {}) or {}
     level = int(levels.get(pid, 0) or 0)
     current = values.get(pid, values.get(slot))
-    # TrueBot dung Exp2 cho pet ID 45000..45999, pet con lai dung Exp thuong.
-    exp_levels = _PET_REBORN_EXP_LEVELS if 45000 <= pid <= 45999 else _PET_EXP_LEVELS
+    # ID 45000..45999 la pet reborn; 46000..46999 dung cong thuc reborn 2.
+    if 46000 <= pid <= 46999:
+        exp_levels = _PET_REBORN2_EXP_LEVELS
+    elif 45000 <= pid <= 45999:
+        exp_levels = _PET_REBORN_EXP_LEVELS
+    else:
+        exp_levels = _PET_EXP_LEVELS
     row = exp_levels.get(level)
     base, required = row if row is not None else (None, None)
     if current is None:
