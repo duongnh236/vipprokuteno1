@@ -1309,6 +1309,20 @@ class SafetyTests(unittest.TestCase):
         self.assertIsNone(empty["mobs"])
         self.assertIsNone(empty["levels"])
 
+    def test_changing_train_map_resets_farm_points_from_selected_map(self):
+        # Doi khu/bai: dropdown diem farm phai dung chi so bai VUA CHON (truyen vao), khong doc
+        # mapSpinner.getSelectedItemPosition() luc spinner con chua ap dung -> giu diem bai cu.
+        java = (Path(__file__).resolve().parents[1]
+                / "app/src/main/java/com/fen/tsbot/MainActivity.java").read_text()
+        a = java.index("private void updateTrainMapFilter(")
+        block = java[a:java.index("\n", a)]
+        self.assertIn("updateFarmPoints(maps.isEmpty()?-1:selected)", block)
+        self.assertIn("private void updateFarmPoints(int mapPos)", java)
+        fp = java[java.index("private void updateFarmPoints(int mapPos)"):]
+        fp = fp[:fp.index("private void updateTrainMapFilter(")]
+        self.assertNotIn("mapSpinner.getSelectedItemPosition()", fp)
+        self.assertIn("applyFarmPoint(1,mapPos)", fp)
+
     def test_farm_point_dropdown_shows_mob_count_and_level(self):
         java = (Path(__file__).resolve().parents[1]
                 / "app/src/main/java/com/fen/tsbot/MainActivity.java").read_text()
