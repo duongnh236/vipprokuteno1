@@ -332,7 +332,7 @@ public void setData(JSONObject data){JSONArray a=data.optJSONArray("accounts");a
         renderDeathSettings(a);
         renderAutoButtons(a);
         Button furnace=btn("XEM LÒ THƯỜNG & LÒ HOÀNG KIM");furnace.setEnabled(a.optBoolean("online"));furnace.setOnClickListener(v->{sectionMode=7;renderBody();accountAction(a,"furnace_scan",new JSONObject());});body.addView(furnace,new LayoutParams(-1,dp(56)));
-        TextView note=txt("EXP pet lấy từ packet server và bảng TrueBot cấp 0–201. Pet chuyển sinh ID 45000–45999 tự dùng bảng EXP riêng.",12,Color.rgb(155,175,200));note.setPadding(0,dp(10),0,0);body.addView(note);
+        TextView note=txt("EXP pet lấy từ packet server và bảng theo cấp. Pet rb2 dùng bảng EXP riêng theo dữ liệu tên pet.",12,Color.rgb(155,175,200));note.setPadding(0,dp(10),0,0);body.addView(note);
     }
     private void renderAutoButtons(JSONObject a){
         final int accountSlot=selected;

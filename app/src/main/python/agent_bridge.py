@@ -390,8 +390,14 @@ def _pet_level_exp_values(client):
     values = getattr(client, "pet_exp_values", {}) or {}
     level = int(levels.get(pid, 0) or 0)
     current = values.get(pid, values.get(slot))
-    # ID 45000..45999 la pet reborn; 46000..46999 dung cong thuc reborn 2.
-    if 46000 <= pid <= 46999:
+    # ID khong phan biet duoc day du cac bac chuyen sinh (vd Gia Cat Luong rb2
+    # la 0x9e9f, nam ngoai cac range cu). Uu tien metadata PET_NAMES co hau to rb2.
+    try:
+        from train_bot import config
+        pet_name = str((getattr(config, "PET_NAMES", {}) or {}).get(pid, ""))
+    except Exception:
+        pet_name = ""
+    if pet_name.lower().rstrip().endswith("rb2"):
         exp_levels = _PET_REBORN2_EXP_LEVELS
     elif 45000 <= pid <= 45999:
         exp_levels = _PET_REBORN_EXP_LEVELS
