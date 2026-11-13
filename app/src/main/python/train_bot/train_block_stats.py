@@ -234,6 +234,28 @@ def spot_mob_range(patterns: dict):
     return min(nums), max(nums)
 
 
+def point_summary(data: dict, map_id: int, x, y) -> dict:
+    """Tom tat 1 diem farm cho UI: so quai 1 tran (min,max) + khoang level, tu so lieu da ghi.
+
+    `data` = load_stats() (doc 1 lan cho ca map list). Chua co so lieu -> mobs/levels = None.
+    """
+    spot = (((data or {}).get("maps", {}) or {}).get(str(int(map_id)), {}) or {}) \
+        .get("spots", {}).get(spot_key((x, y))) or {}
+    rng = spot_mob_range(spot.get("patterns") or {})
+    table = _npc_table()
+    levels = []
+    for tid in (spot.get("mobs") or {}):
+        lv = (table.get(str(tid)) or {}).get("level")
+        if isinstance(lv, int) and lv > 0:
+            levels.append(lv)
+    return {
+        "x": int(x), "y": int(y),
+        "battles": int(spot.get("total", 0) or 0),
+        "mobs": list(rng) if rng else None,
+        "levels": [min(levels), max(levels)] if levels else None,
+    }
+
+
 def format_mob_range(patterns: dict) -> str:
     """'3-5', hoac '3' khi luc nao cung 3 con."""
     rng = spot_mob_range(patterns)

@@ -41,6 +41,9 @@ skill `farm-di-gioi`.
 | Mời **user ngoài** (tab Điều Khiển) | `agent_bridge.set_external_invite_json` → `run_party_digioi.py::_cho_user_ngoai_vao_party` (hook trong `_do_manual_route`, trước khi kéo ra bãi) |
 | Gom lại do lệch kênh | `workflows/channel_regroup.py::request/tick` |
 | Roster party | `workflows/party.py::missing_from_server_roster` |
+| Dropdown khu vực / bãi / điểm | `MainActivity.java::updateTrainMapFilter`, `updateFarmPoints`, `pointInfo` ← `agent_bridge.catalog_json` |
+| Số quái + cấp độ theo điểm | `train_block_stats.py::point_summary` (số liệu `train_block_stats.json` + `npc_table.json`) |
+| Bãi quái linh hồn | map tên `LH-...` → `train_pick.is_soul_map` (catalog trả `soul: true`) |
 
 ## State / cờ cần soi khi kẹt
 
@@ -72,6 +75,9 @@ skill `farm-di-gioi`.
 - Phân khu manual phải áp dụng **ngay tại thành tập kết**, trước khi mời party và kéo ra bãi.
 - Tái dùng battle/heal config đã lưu, **không** ghi đè rule skill / ngưỡng HP/SP khi chuyển luồng.
 - Feature mới → module riêng + entry point riêng (`docs/workflow-architecture.md`).
+- **Điểm farm hiển thị thông tin**: mỗi điểm trong dropdown ghi `N quái` (min-max số con trong 1 trận,
+  từ `patterns`) và `lv L1-L2` (từ `mobs` theo template → `npc_table.level`). Chưa có số liệu → ghi
+  `chưa có dữ liệu`. Bãi linh hồn có tiền tố `LH-` (cực khỏe, phải reborn 2 lần).
 - **Mời user ngoài**: chỉ chạy khi `ext_invite_on=True` + có tên. Leader mời người đó khi lập đội
   (sau khi bot member đủ), chờ **tối đa 5 phút**; vào được thì tiếp tục, hết hạn thì **hủy lệnh** và
   chạy tiếp. Party đủ **5 người** → bỏ qua. **Không** đụng whitelist/bot member → không va chạm luồng cũ.

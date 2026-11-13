@@ -569,10 +569,18 @@ def _save_leader(username):
 
 
 def catalog_json():
-    from train_bot import config
+    from train_bot import config, train_block_stats, train_pick
+    # So lieu quai theo diem (so con / cap do) doc 1 lan cho ca danh sach map.
+    stats = train_block_stats.load_stats()
     maps = []
     for map_id, item in sorted(config.TRAIN_MAPS.items(), key=lambda x: (x[1].get("group", ""), x[0])):
-        maps.append({"id": map_id, "name": item.get("name") or str(map_id), "group": item.get("group", ""), "mobs": item.get("mobs", [])})
+        name = item.get("name") or str(map_id)
+        points = [train_block_stats.point_summary(stats, map_id, p[0], p[1])
+                  for p in item.get("mobs", [])]
+        # `points` song song voi `mobs` (cung thu tu) -> UI doc so quai/cap do theo tung diem.
+        maps.append({"id": map_id, "name": name, "group": item.get("group", ""),
+                     "mobs": item.get("mobs", []), "soul": train_pick.is_soul_map(name),
+                     "points": points})
     servers = []
     for key, item in config.SERVERS.items():
         servers.append({"key": key, "label": item.get("label", key), "ip": item.get("ip", ""), "id": int(item.get("id", 1))})

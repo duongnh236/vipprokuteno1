@@ -1243,6 +1243,36 @@ class SafetyTests(unittest.TestCase):
         self.assertIn('event.position[0] in (config.UNIT_CHAR, config.UNIT_PET)', block)
         self.assertIn('event.position[1] == getattr(self.state, "my_atype", None)', block)
 
+    def test_farm_point_summary_gives_mob_count_and_level_range(self):
+        # Diem farm: so quai 1 tran (tu patterns) + khoang cap do (tu mobs x npc_table level).
+        ns = {}
+        path = "train_bot/train_block_stats.py"
+        function(path, "_mobs_in_pattern", ns)
+        function(path, "spot_mob_range", ns)
+        ns["spot_key"] = lambda spot: f"{int(spot[0])},{int(spot[1])}"
+        ns["_npc_table"] = lambda: {"11": {"level": 110}, "12": {"level": 112}}
+        point_summary = function(path, "point_summary", ns)
+        data = {"maps": {"21841": {"spots": {"100,200": {
+            "total": 9, "patterns": {"3x1 + 1x1": 5, "3x1": 4}, "mobs": {"11": 3, "12": 2}}}}}}
+        s = point_summary(data, 21841, 100, 200)
+        self.assertEqual(s["mobs"], [3, 4])
+        self.assertEqual(s["levels"], [110, 112])
+        self.assertEqual(s["battles"], 9)
+        # Chua co so lieu -> None, khong bao gio nem loi.
+        empty = point_summary(data, 21841, 1, 1)
+        self.assertIsNone(empty["mobs"])
+        self.assertIsNone(empty["levels"])
+
+    def test_farm_point_dropdown_shows_mob_count_and_level(self):
+        java = (Path(__file__).resolve().parents[1]
+                / "app/src/main/java/com/fen/tsbot/MainActivity.java").read_text()
+        self.assertIn("pointInfo(info==null?null:info.optJSONObject(i))", java)
+        self.assertIn('" quái"', java)
+        self.assertIn('lv ").append', java)
+        bridge = (ROOT / "agent_bridge.py").read_text()
+        self.assertIn('"points": points', bridge)
+        self.assertIn('"soul": train_pick.is_soul_map(name)', bridge)
+
     def test_stale_combat_worker_self_heals_current_turn(self):
         # Worker cua luot CU bi vo hieu nhung luot HIEN TAI chua gui -> phai RE-ARM, khong duoc bo.
         # Truoc day chi `return` -> luot hien tai khong co worker nao -> bot dung im -> LUOT CHAM /
