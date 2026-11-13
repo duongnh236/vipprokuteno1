@@ -2069,6 +2069,41 @@ def _thanh_dong_acc_nhat(pidx):
     return sorted(dem.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
 
+TRAC_QUAN_CITY = 12001   # ai cung ve duoc: fallback tap ket khi co thanh vien khong co thanh gan nhat
+
+
+def _train_xuat_phat(pidx, leader, dest_map, users):
+    """(city, flag, ly_do) - thanh XUAT PHAT + TAP KET cua lenh TRAIN.
+
+    - Co thanh vien KHONG co thanh gan nhat (router khong tim duoc thanh nao ma acc do da mo tu map
+      hien tai) -> CA TEAM ve Trac Quan, party tai do, roi leader keo ra bai.
+    - Khong thi: thanh GAN bai nhat ma CA PARTY da mo (giong `_pick_start_city`).
+    Thanh vien chua biet map -> khong ket luan (khong kich fallback oan).
+    """
+    leader_user = config.PARTY_LEADER_ACC.get(pidx)
+    thieu = []
+    for u in users or ():
+        if u == leader_user:
+            continue
+        m = account_clients.get(u)
+        if m is None or not getattr(m, "running", False) or getattr(m, "current_map", None) is None:
+            continue
+        allowed = {int(cid) for cid in (getattr(config, "TELEPORT_CITY_IDS", None) or ())
+                   if m.city_unlocked(int(cid)) is not False}
+        if not m.nearest_smart_city(int(m.current_map), allowed=allowed):
+            thieu.append(u)
+    flag_tq = int((getattr(config, "TELEPORT_CITIES", None) or {}).get(TRAC_QUAN_CITY, {}).get("flag", 0))
+    if thieu:
+        return (TRAC_QUAN_CITY, flag_tq,
+                "thanh vien %s KHONG co thanh gan nhat -> ca team ve Trac Quan" % ", ".join(thieu))
+    mo = _party_unlocked_cities(pidx)
+    got = leader.nearest_smart_city(int(dest_map), exclude_map=int(dest_map), allowed=mo) if mo else None
+    if not got:
+        return (TRAC_QUAN_CITY, flag_tq,
+                "khong thanh nao ca party da mo di toi bai -> ve Trac Quan")
+    return int(got["city"]), int(got["flag"]), "thanh gan bai nhat ma ca party da mo"
+
+
 def _gather_city(pidx, dest_city, gen):
     """Diem GOM cua party khi khong ve thang `dest_city` duoc: thanh GAN NHAT ma CA PARTY da mo.
 
@@ -7208,23 +7243,33 @@ def run_account(username, password, pidx, is_leader, is_picker=False, is_reconne
                 # thi GIAI TAN party + dung yen o map dich (dung nhu setting khong-chu-PT).
                 route_leader = is_leader or (not has_leader and is_picker)
                 if route_leader:
-                    source = source_req
-                    if not source:
-                        picked = c.nearest_smart_city(dest, exclude_map=dest)
-                        if not picked:
-                            log.warning("[%s] manual route: khong tim duoc thanh gan map dich %s",
-                                        label, dest)
+                    if kind == "train":
+                        # Thanh xuat phat = thanh gan bai nhat MA CA TEAM DA MO; co thanh vien khong
+                        # co thanh gan nhat -> ca team ve Trac Quan (xem _train_xuat_phat).
+                        _city, _flag, _why = _train_xuat_phat(
+                            pidx, c, int(dest),
+                            list(st.get("manual_train_users") or []) or _running_party_usernames(pidx))
+                        log.info("[%s] manual route TRAIN: %s -> thanh tap ket %s", label, _why, _city)
+                        source = int(_city)
+                        gather = {"city": int(_city), "flag": int(_flag)}
+                    else:
+                        source = source_req
+                        if not source:
+                            picked = c.nearest_smart_city(dest, exclude_map=dest)
+                            if not picked:
+                                log.warning("[%s] manual route: khong tim duoc thanh gan map dich %s",
+                                            label, dest)
+                                st["manual_route_plan_ready"].set()
+                                st["manual_route_done"].set()
+                                return
+                            source = int(picked["city"])
+                        gather = c.nearest_smart_city(source)
+                        if not gather:
+                            log.warning("[%s] manual route: khong tim duoc thanh gan map bat dau %s",
+                                        label, source)
                             st["manual_route_plan_ready"].set()
                             st["manual_route_done"].set()
                             return
-                        source = int(picked["city"])
-                    gather = c.nearest_smart_city(source)
-                    if not gather:
-                        log.warning("[%s] manual route: khong tim duoc thanh gan map bat dau %s",
-                                    label, source)
-                        st["manual_route_plan_ready"].set()
-                        st["manual_route_done"].set()
-                        return
                     users = (list(st.get("manual_train_users") or []) if kind == "train"
                              else _active_party_usernames(pidx))
                     if not users:

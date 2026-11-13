@@ -492,6 +492,7 @@ class SafetyTests(unittest.TestCase):
                                 in_combat=lambda **kw: False, in_di_gioi=lambda: False,
                                 _wait_combat_clear=Mock(), combat_ready=Mock(), leave_party=Mock(),
                                 nearest_smart_city=lambda *args, **kw: {"city": 23001, "flag": 0},
+                                city_unlocked=lambda cid: True,
                                 invite_members=Mock(), set_party_strategist=Mock(),
                                 pre_route_town_hop=Mock(side_effect=AssertionError("random hop forbidden")))
             def town(city, flag, client=c, **kw):
@@ -521,7 +522,8 @@ class SafetyTests(unittest.TestCase):
             return True
         leader.follow_smart_scene_route = Mock(side_effect=route)
         leader.navigate_to = Mock(return_value=True)
-        cfg = SimpleNamespace(TRAIN_MAPS={23803: {"safe": []}}, PARTY_LEADER_ACC={0: "leader"})
+        cfg = SimpleNamespace(TRAIN_MAPS={23803: {"safe": []}}, PARTY_LEADER_ACC={0: "leader"},
+                              TELEPORT_CITY_IDS=(23001,), TELEPORT_CITIES={23001: {"flag": 0}})
         shared = {"config": cfg, "account_clients": clients, "time": SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=lambda _: time.sleep(0.003)),
                   "log": logging.getLogger("test"), "_resolve_train_safe": lambda *args: None,
                   "set_account_activity": Mock(), "joined_member_count": lambda _: 0,  # Simulate stale local ACK count.
@@ -529,6 +531,10 @@ class SafetyTests(unittest.TestCase):
                   "_cho_user_ngoai_vao_party": Mock(return_value=True),
                   "_resync_ck": Mock(), "READY_WAIT_REFORM_SEC": 5,
                   "_route_mismatch_timed_out": lambda *args, **kwargs: False}
+        shared["_party_unlocked_cities"] = lambda pidx: [23001]
+        shared["_running_party_usernames"] = lambda pidx: list(users)
+        shared["TRAC_QUAN_CITY"] = 12001
+        function("train_bot/run_party_digioi.py", "_train_xuat_phat", shared)
         for name in ("_workflow_leave_current_area", "_open_route_member_invites", "_train_retry_leader_channel", "_train_fallback_full_channel", "_train_adopt_map_channel", "_farm_party_missing"):
             function("train_bot/run_party_digioi.py", name, shared)
         errors = []
@@ -1242,6 +1248,46 @@ class SafetyTests(unittest.TestCase):
         block = source[a:b]
         self.assertIn('event.position[0] in (config.UNIT_CHAR, config.UNIT_PET)', block)
         self.assertIn('event.position[1] == getattr(self.state, "my_atype", None)', block)
+
+    def test_train_gather_falls_back_to_trac_quan_when_member_has_no_nearest_city(self):
+        # Co thanh vien KHONG co thanh gan nhat -> ca team ve Trac Quan (12001), party tai do.
+        # Ca team deu co thanh gan nhat -> thanh gan bai nhat ma ca party da mo.
+        class Member:
+            def __init__(self, current_map, unlocked, reachable):
+                self.running = True
+                self.current_map = current_map
+                self._unlocked = unlocked
+                self._reachable = reachable
+
+            def city_unlocked(self, cid):
+                return self._unlocked.get(cid)
+
+            def nearest_smart_city(self, dest, exclude_map=None, allowed=None):
+                ok = [c for c in (allowed or ()) if c in self._reachable]
+                return {"city": ok[0], "flag": 0} if ok else None
+
+        class Leader(Member):
+            def nearest_smart_city(self, dest, exclude_map=None, allowed=None):
+                return {"city": 12061, "flag": 2} if allowed and 12061 in allowed else None
+
+        leader = Leader(23001, {}, {12061})
+        ok_member = Member(23802, {12001: True, 12061: True}, {12001, 12061})
+        lost_member = Member(99999, {12001: False, 12061: False}, set())
+        clients = {"leader": leader, "ok": ok_member, "lost": lost_member}
+        ns = {"config": SimpleNamespace(PARTY_LEADER_ACC={0: "leader"},
+                                        TELEPORT_CITY_IDS=(12001, 12061),
+                                        TELEPORT_CITIES={12001: {"flag": 0}, 12061: {"flag": 2}}),
+              "account_clients": clients, "TRAC_QUAN_CITY": 12001,
+              "_party_unlocked_cities": lambda pidx: [12061],
+              "log": logging.getLogger("test")}
+        fn = function("train_bot/run_party_digioi.py", "_train_xuat_phat", ns)
+        # Co thanh vien mat thanh gan nhat -> Trac Quan.
+        city, flag, why = fn(0, leader, 23803, ["leader", "ok", "lost"])
+        self.assertEqual((city, flag), (12001, 0))
+        self.assertIn("lost", why)
+        # Tat ca deu co thanh gan nhat -> thanh gan bai nhat ca party da mo.
+        city, flag, _why = fn(0, leader, 23803, ["leader", "ok"])
+        self.assertEqual((city, flag), (12061, 2))
 
     def test_farm_point_summary_gives_mob_count_and_level_range(self):
         # Diem farm: so quai 1 tran (tu patterns) + khoang cap do (tu mobs x npc_table level).

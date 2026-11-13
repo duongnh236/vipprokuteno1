@@ -75,6 +75,10 @@ skill `farm-di-gioi`.
 - Phân khu manual phải áp dụng **ngay tại thành tập kết**, trước khi mời party và kéo ra bãi.
 - Tái dùng battle/heal config đã lưu, **không** ghi đè rule skill / ngưỡng HP/SP khi chuyển luồng.
 - Feature mới → module riêng + entry point riêng (`docs/workflow-architecture.md`).
+- **Thành xuất phát / tập kết của lệnh TRAIN** (`run_party_digioi.py::_train_xuat_phat`, gọi trong
+  `_do_manual_route`): (a) nếu có **thành viên KHÔNG có thành gần nhất** (router không tìm được thành
+  nào mà acc đó đã mở, tính từ map hiện tại) → **cả team về Trác Quận (12001)**, party tại đó rồi
+  leader kéo ra bãi; (b) không thì chọn thành **gần bãi nhất mà cả party đã mở**.
 - **Điểm farm hiển thị thông tin**: mỗi điểm trong dropdown ghi `N quái` (min-max số con trong 1 trận,
   từ `patterns`) và `lv L1-L2` (từ `mobs` theo template → `npc_table.level`). Chưa có số liệu → ghi
   `chưa có dữ liệu`. Bãi linh hồn có tiền tố `LH-` (cực khỏe, phải reborn 2 lần).

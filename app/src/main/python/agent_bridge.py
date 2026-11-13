@@ -1635,7 +1635,7 @@ def status_json():
                                              for level in (20, 50, 80, 110)}
                                             if client is not None else {}),
             })
-            
+
         return json.dumps({"ok": True, "accounts": rows, "error": _last_error}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"ok": False, "accounts": [], "error": "%s: %s" % (type(exc).__name__, exc)}, ensure_ascii=False)
