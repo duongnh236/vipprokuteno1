@@ -1289,6 +1289,39 @@ class SafetyTests(unittest.TestCase):
         city, flag, _why = fn(0, leader, 23803, ["leader", "ok"])
         self.assertEqual((city, flag), (12061, 2))
 
+    def test_external_leader_mode_whitelists_name_and_stops_dispatch(self):
+        # Checkbox "nguoi ngoai la leader": ten duoc dua vao whitelist leader cua party 0 de bot
+        # NHAN loi moi tu ten do; tat thi bo ten. Va leader bot KHONG dieu phoi party khi bat.
+        cfg = SimpleNamespace(PARTY_LEADERS_BY_IDX={})
+        ns = {}
+        with patch.dict("sys.modules", {"train_bot": SimpleNamespace(config=cfg)}):
+            whitelist = function("agent_bridge.py", "_set_ext_leader_whitelist", ns)
+            whitelist("NguoiNgoai", True)
+            self.assertEqual(cfg.PARTY_LEADERS_BY_IDX[0], ["NguoiNgoai"])
+            whitelist("NguoiNgoai", True)          # khong trung lap
+            self.assertEqual(cfg.PARTY_LEADERS_BY_IDX[0], ["NguoiNgoai"])
+            whitelist("NguoiNgoai", False)
+            self.assertEqual(cfg.PARTY_LEADERS_BY_IDX[0], [])
+        src = (ROOT / "train_bot/run_party_digioi.py").read_text()
+        self.assertIn('if st.get("ext_invite_leader"):\n                    continue', src)
+        bridge = (ROOT / "agent_bridge.py").read_text()
+        self.assertIn("def set_external_invite_json(enabled=False, username=\"\", ext_leader=False)", bridge)
+        self.assertIn('if runner._pstate(0).get("ext_invite_leader"):', bridge)
+        java = (Path(__file__).resolve().parents[1]
+                / "app/src/main/java/com/fen/tsbot/MainActivity.java").read_text()
+        self.assertIn("extLeaderCheck", java)
+        self.assertIn("on && extLeader", java)
+
+    def test_external_invite_section_has_leader_switch_button(self):
+        # Nut DOI LEADER nam trong khu vuc MOI NGUOI NGOAI, dung lai hop thoai doi leader online.
+        java = (Path(__file__).resolve().parents[1]
+                / "app/src/main/java/com/fen/tsbot/MainActivity.java").read_text()
+        a = java.index('section("MỜI NGƯỜI NGOÀI VÀO PARTY")')
+        b = java.index('partyStatsButton=button(', a)
+        block = java[a:b]
+        self.assertIn("ĐỔI LEADER", block)
+        self.assertIn("showLeaderSwitchDialog()", block)
+
     def test_farm_point_summary_gives_mob_count_and_level_range(self):
         # Diem farm: so quai 1 tran (tu patterns) + khoang cap do (tu mobs x npc_table level).
         ns = {}

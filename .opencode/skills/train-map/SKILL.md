@@ -82,6 +82,11 @@ skill `farm-di-gioi`.
 - **Điểm farm hiển thị thông tin**: mỗi điểm trong dropdown ghi `N quái` (min-max số con trong 1 trận,
   từ `patterns`) và `lv L1-L2` (từ `mobs` theo template → `npc_table.level`). Chưa có số liệu → ghi
   `chưa có dữ liệu`. Bãi linh hồn có tiền tố `LH-` (cực khỏe, phải reborn 2 lần).
+- **Người ngoài là LEADER** (checkbox `extLeaderCheck` → `set_external_invite_json(..., ext_leader)`):
+  tên đưa vào `config.PARTY_LEADERS_BY_IDX[0]` để bot **nhận lời mời** từ người đó
+  (`_accept_party_invite`); `state.ext_invite_leader=True` làm `_dieu_phoi` **bỏ qua** party này
+  (bot không gom/lập/ra bãi); nút BẮT ĐẦU FARM chỉ bật `party_invite_ready` + `apply_auto_mode("battle")`
+  cho từng bot. Đánh theo setup bot. Chưa xác minh trên máy: bot có tự đi theo leader người ngoài không.
 - **Mời user ngoài**: chỉ chạy khi `ext_invite_on=True` + có tên. Leader mời người đó khi lập đội
   (sau khi bot member đủ), chờ **tối đa 5 phút**; vào được thì tiếp tục, hết hạn thì **hủy lệnh** và
   chạy tiếp. Party đủ **5 người** → bỏ qua. **Không** đụng whitelist/bot member → không va chạm luồng cũ.

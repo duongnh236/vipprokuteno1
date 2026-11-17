@@ -1180,6 +1180,16 @@ def auto_battle_team_json(map_id=0, x=0, y=0):
             raise RuntimeError("Chua co account trong team")
         if not live:
             raise RuntimeError("Chua co account online de bat dau farm")
+        if runner._pstate(0).get("ext_invite_leader"):
+            # Nguoi ngoai la LEADER: bot KHONG dieu phoi/gom/ra bai. Moi bot bat danh theo setup
+            # cua minh, san sang nhan loi moi tu nguoi ngoai (party_invite_ready).
+            name = str(runner._pstate(0).get("ext_invite_leader_name") or "")
+            for _u, c in live:
+                c.set_party_invite_ready(True)
+                c.apply_auto_mode("battle", True)
+            return json.dumps({"ok": True, "message":
+                               "Bot %d account sẵn sàng nhận lời mời từ '%s' (leader người ngoài) và đánh theo setup bot"
+                               % (len(live), name)}, ensure_ascii=False)
         live_users = {u for u, _c in live}
         leader_user = next((row[0] for row in configured if row[2]), "")
         if not leader_user:
@@ -1438,7 +1448,17 @@ def poll_ui_notices_json(after=0):
                            "message": "%s" % exc}, ensure_ascii=False)
 
 
-def set_external_invite_json(enabled=False, username=""):
+def _set_ext_leader_whitelist(name, on):
+    """Them/bo ten nguoi ngoai vao whitelist leader cua party 0 -> bot chi nhan loi moi tu ten do."""
+    from train_bot import config
+    lst = config.PARTY_LEADERS_BY_IDX.setdefault(0, [])
+    if on and name and name not in lst:
+        lst.append(name)
+    if not on and name in lst:
+        lst.remove(name)
+
+
+def set_external_invite_json(enabled=False, username="", ext_leader=False):
     """BAT/TAT moi 1 USER NGOAI (nhap tay) vao party cua leader.
 
     CHI khi bat (`enabled=True`) VA co ten: leader moi nguoi do trong luc lap party, cho toi da
@@ -1454,10 +1474,20 @@ def set_external_invite_json(enabled=False, username=""):
             return json.dumps({"ok": False, "message": "Hãy nhập tên user ngoài"}, ensure_ascii=False)
         if len(name) > 24 or any(ord(ch) < 32 for ch in name):
             return json.dumps({"ok": False, "message": "Tên user ngoài không hợp lệ"}, ensure_ascii=False)
+        ext_leader = bool(ext_leader) and on
+        old_name = str(st.get("ext_invite_leader_name") or "")
+        if old_name and (old_name != name or not ext_leader):
+            _set_ext_leader_whitelist(old_name, False)
+        if ext_leader:
+            _set_ext_leader_whitelist(name, True)
         with st["lock"]:
             changed = (bool(st.get("ext_invite_on")) != on
-                       or str(st.get("ext_invite_name") or "") != name)
-            st["ext_invite_on"] = on
+                       or str(st.get("ext_invite_name") or "") != name
+                       or bool(st.get("ext_invite_leader")) != ext_leader)
+            st["ext_invite_leader"] = ext_leader
+            st["ext_invite_leader_name"] = name if ext_leader else ""
+            # Che do NGUOI NGOAI LA LEADER: leader bot KHONG moi nguoi do (bot tu nhan loi moi).
+            st["ext_invite_on"] = on and not ext_leader
             st["ext_invite_name"] = name
             if changed:
                 st["ext_invite_gen"] = int(st.get("ext_invite_gen") or 0) + 1
@@ -1465,7 +1495,10 @@ def set_external_invite_json(enabled=False, username=""):
                 st["ext_invite_started_at"] = 0.0
                 st["ext_invite_last_at"] = 0.0
                 st["ext_invite_status"] = "waiting" if (on and name) else "idle"
-        if on and name:
+        if on and name and ext_leader:
+            log.info(">>> NGUOI NGOAI LA LEADER: BAT '%s' (bot nhan loi moi tu nguoi nay, danh theo setup bot)", name)
+            msg = "Đã BẬT: '%s' là leader. Bot sẽ nhận lời mời từ '%s' và đánh theo setup của bot. Bấm BẮT ĐẦU FARM để bot sẵn sàng nhận lời mời." % (name, name)
+        elif on and name:
             log.info(">>> MOI USER NGOAI: BAT '%s' (cho toi da 5 phut khi lap party)", name)
             msg = "Đã BẬT mời user ngoài '%s' (leader mời khi lập party, tối đa 5 phút)" % name
         else:

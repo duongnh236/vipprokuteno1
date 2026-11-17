@@ -34,7 +34,7 @@ public class MainActivity extends Activity {
     private SharedPreferences trainPrefs; private boolean restoringTrainSelection=false;
     private Button switchLeaderButton,loginAllButton,logoutAllButton,npc40Button,partyStatsButton;
     // MỜI USER NGOÀI vào party (control tab). Trước đây chỉ có Python/bridge, thiếu UI nên không thấy.
-    private EditText extInviteName;
+    private EditText extInviteName; private CheckBox extLeaderCheck;
     private boolean loginAllPending=false,loginAllAcknowledged=false,logoutAllPending=false;
     private View configView; private TeamMapView teamMapView; private AccountManagerView accountManagerView; private FrameLayout pageHost;
     private final Button[] accountNavButtons=new Button[5]; private Button controlNavButton; private int currentPage=0,selectedAccount=0; private JSONArray bottomAccounts=new JSONArray();
@@ -102,7 +102,14 @@ public class MainActivity extends Activity {
         Button extInviteApply=button("✓  ÁP DỤNG MỜI NGOÀI",Color.rgb(38,145,92),Color.WHITE);extInviteApply.setOnClickListener(v->applyExternalInvite(true));
         Button extInviteOff=button("✕  TẮT MỜI NGOÀI",Color.rgb(150,60,66),Color.WHITE);extInviteOff.setOnClickListener(v->applyExternalInvite(false));
         extInviteRow.addView(extInviteApply,weight());extInviteRow.addView(extInviteOff,weight());
+        // Checkbox: nguoi ngoai la LEADER. Bat -> bot nhan loi moi tu ten tren va danh theo setup bot.
+        // Tat -> team leader cua bot moi user ngoai nhu cu.
+        extLeaderCheck=new CheckBox(this);extLeaderCheck.setText("Người ngoài là team leader (bot nhận lời mời từ người này)");extLeaderCheck.setTextColor(Color.WHITE);extLeaderCheck.setTextSize(13);
+        root.addView(extLeaderCheck,matchWrap());
         root.addView(extInviteRow,matchWrap());
+        // Doi leader ngay trong khu vuc moi nguoi ngoai: dung lai hop thoai + luong doi leader online
+        // (switch_leader_json). Leader moi PHAI la account bot dang online, khong phai nguoi ngoai.
+        Button extSwitchLeader=button("👑  ĐỔI LEADER",Color.rgb(145,100,30),Color.WHITE);extSwitchLeader.setOnClickListener(v->showLeaderSwitchDialog());root.addView(extSwitchLeader,matchWrap());
         partyStatsButton=button("📊  AGI & CẤP TEAM (combo)",Color.rgb(58,104,148),Color.WHITE);partyStatsButton.setOnClickListener(v->showPartyStats());root.addView(partyStatsButton,matchWrap());
         serverSpinner = spinner(); modeSpinner = spinner(); digioiLevelSpinner=spinner(); digioiModeSpinner=spinner(); trainGroupSpinner=spinner(); mapSpinner = spinner(); farmPointSpinner=spinner();
         modeSpinner.setAdapter(adapter(Arrays.asList("Train theo map", "Đứng yên", "Dị giới + farm")));
@@ -389,10 +396,11 @@ private void showLeaderSwitchDialog(){List<String> names=new ArrayList<>(),ids=n
     private void applyExternalInvite(boolean on) {
         final String name = extInviteName == null ? "" : extInviteName.getText().toString().trim();
         if (on && name.isEmpty()) { Toast.makeText(this, "Hãy nhập tên user ngoài", Toast.LENGTH_LONG).show(); return; }
+        final boolean extLeader = extLeaderCheck != null && extLeaderCheck.isChecked();
         io.execute(() -> {
             try {
                 JSONObject r = new JSONObject(Python.getInstance().getModule("agent_bridge")
-                        .callAttr("set_external_invite_json", on, on ? name : "").toString());
+                        .callAttr("set_external_invite_json", on, on ? name : "", on && extLeader).toString());
                 runOnUiThread(() -> Toast.makeText(this, r.optString("message"), Toast.LENGTH_LONG).show());
             } catch (Exception e) {
                 runOnUiThread(() -> Toast.makeText(this, "Lỗi mời người ngoài: " + e.getMessage(), Toast.LENGTH_LONG).show());

@@ -12103,6 +12103,9 @@ def _dieu_phoi_loop():
                     lech_tu.pop(pidx, None)
                     continue
                 st = _pstate(pidx)
+                # Nguoi ngoai LA LEADER: bot la member, KHONG dieu phoi gom/lap/doi kenh/ra bai.
+                if st.get("ext_invite_leader"):
+                    continue
                 if (st.get("train_channel_regroup") or st.get("ui_member_recover") or st.get("ui_leader_recover")
                         or st.get("leader_switch_pending") or st.get("ui_mode_restart_users")
                         or st.get("ui_dg_transition_pending")
