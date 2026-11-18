@@ -1322,6 +1322,17 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("ĐỔI LEADER", block)
         self.assertIn("showLeaderSwitchDialog()", block)
 
+    def test_dashboard_poll_does_not_rebuild_body_while_user_touches_dropdown(self):
+        # Poll 2.5s goi setData -> renderBody (dung lai ca View): popup Spinner dang mo bi dong nen
+        # khong cuon duoc. Cham vao view phai giu viec dung lai (HOLD_MS) truoc khi setData dung lai.
+        java = (Path(__file__).resolve().parents[1]
+                / "app/src/main/java/com/fen/tsbot/AccountManagerView.java").read_text()
+        self.assertIn("dispatchTouchEvent(android.view.MotionEvent ev)", java)
+        self.assertIn("ACTION_DOWN)rebuildHeldUntil=System.currentTimeMillis()+HOLD_MS", java)
+        a = java.index("public void setData(JSONObject data)")
+        block = java[a:java.index("private void renderTabs()", a)]
+        self.assertIn("if(System.currentTimeMillis()<rebuildHeldUntil)return;", block)
+
     def test_farm_point_summary_gives_mob_count_and_level_range(self):
         # Diem farm: so quai 1 tran (tu patterns) + khoang cap do (tu mobs x npc_table level).
         ns = {}

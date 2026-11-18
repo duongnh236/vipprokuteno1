@@ -61,6 +61,14 @@ android {
         // Splash dung BuildConfig.VERSION_NAME de hien so phien ban (auto-bump moi build).
         buildConfig true
     }
+    packaging {
+        // Giai nen .so (Chaquopy libpython...) ra file khi cai, thay vi nap truc tiep tu APK.
+        // App Cloner dong goi lai APK -> .so khong con map duoc tu APK -> clone crash khi cai,
+        // tru khi bat "Skip native libraries". extractNativeLibs=true (manifest) khac phuc viec do.
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
 }
 
 // Ten file APK xuat ra: aTSBot-Android-v<version>-<buildType>.apk (KHONG chua chu "unsigned" nen
