@@ -67,7 +67,8 @@ public class MainActivity extends Activity {
         if (!Python.isStarted()) Python.start(new AndroidPlatform(this));
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 5);
-        setContentView(buildTabbedUi());
+        setContentView(windowedContent(buildTabbedUi()));
+        applyAppWindow();
         registerReceiver(resultReceiver, new IntentFilter(BotService.RESULT), RECEIVER_NOT_EXPORTED);
         io.execute(this::loadCatalog);
     }
@@ -446,37 +447,24 @@ private void updateSelectionInfo(){if(selectionInfo==null)return;String s=server
     private Spinner spinner(){Spinner s=new Spinner(this);s.setBackgroundTintList(android.content.res.ColorStateList.valueOf(GOLD));return s;} private ArrayAdapter<String> adapter(List<String> x){return new ArrayAdapter<String>(this,android.R.layout.simple_spinner_dropdown_item,x){private TextView paint(View v,int color){TextView t=(TextView)v;t.setTextColor(color);t.setTextSize(14);t.setPadding(dp(12),dp(10),dp(12),dp(10));return t;}@Override public View getView(int p,View c,android.view.ViewGroup g){return paint(super.getView(p,c,g),Color.WHITE);}@Override public View getDropDownView(int p,View c,android.view.ViewGroup g){TextView t=paint(super.getDropDownView(p,c,g),Color.rgb(25,35,48));t.setBackgroundColor(Color.WHITE);return t;}};}
     private Button button(String s,int bg,int fg){Button b=new Button(this);b.setText(s);b.setAllCaps(false);b.setTextSize(13);b.setMinHeight(dp(52));android.graphics.drawable.GradientDrawable shape=new android.graphics.drawable.GradientDrawable();shape.setColor(Color.WHITE);shape.setCornerRadius(dp(12));b.setBackground(shape);b.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{}},new int[]{Color.rgb(37,45,58),bg}));b.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{}},new int[]{Color.rgb(120,132,149),fg}));return b;} private View space(int h){Space s=new Space(this);s.setLayoutParams(new LinearLayout.LayoutParams(1,dp(h)));return s;}
     private LinearLayout.LayoutParams matchWrap(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.setMargins(0,dp(4),0,dp(4));return p;} private LinearLayout.LayoutParams weight(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,-2,1);p.setMargins(dp(4),dp(8),dp(4),dp(8));return p;} private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
-    private View floatingContent;
-    private WindowManager floatingManager;
-    private boolean overlayPermissionRequested;
-    private void ensureFloatingPermission(){
-        if(!android.provider.Settings.canDrawOverlays(this)&&!overlayPermissionRequested){
-            overlayPermissionRequested=true;
-            Toast.makeText(this,"Cho phép hiển thị trên ứng dụng khác để dùng cửa sổ nổi",Toast.LENGTH_LONG).show();
-            try{startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,android.net.Uri.parse("package:"+getPackageName())));}catch(Exception ignored){}
-        }
+    private boolean windowExpanded=false;
+    private void applyAppWindow(){
+        android.util.DisplayMetrics m=getResources().getDisplayMetrics();
+        Window w=getWindow();w.setGravity(Gravity.CENTER);
+        w.setLayout(windowExpanded?m.widthPixels:(int)(m.widthPixels*.94),windowExpanded?m.heightPixels:(int)(m.heightPixels*.78));
+        w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        w.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL);
+        w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        setFinishOnTouchOutside(false);
     }
-    private void showFloatingWindow(){
-        if(isFinishing()||isChangingConfigurations()||floatingContent!=null||!android.provider.Settings.canDrawOverlays(this))return;
-        ViewGroup host=findViewById(android.R.id.content);
-        if(host.getChildCount()==0)return;
-        View content=host.getChildAt(0);host.removeView(content);
+    private View windowedContent(View content){
         LinearLayout frame=new LinearLayout(this);frame.setOrientation(LinearLayout.VERTICAL);frame.setBackgroundColor(BG);
-        TextView handle=new TextView(this);handle.setText("TSBOT  •  Kéo để di chuyển  •  Chạm hai lần để mở");handle.setTextColor(Color.WHITE);handle.setPadding(16,16,16,16);frame.addView(handle);
-        frame.addView(content,new LinearLayout.LayoutParams(-1,0,1));
-        android.util.DisplayMetrics metrics=getResources().getDisplayMetrics();
-        WindowManager.LayoutParams params=new WindowManager.LayoutParams(Math.min(metrics.widthPixels,(int)(380*metrics.density)),Math.min((int)(metrics.heightPixels*.75),(int)(650*metrics.density)),WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,android.graphics.PixelFormat.TRANSLUCENT);
-        params.gravity=Gravity.TOP|Gravity.LEFT;params.x=0;params.y=80;
-        floatingManager=(WindowManager)getSystemService(WINDOW_SERVICE);
-        handle.setOnTouchListener(new View.OnTouchListener(){float x,y;int px,py;long lastTap;public boolean onTouch(View v,MotionEvent e){if(e.getAction()==MotionEvent.ACTION_DOWN){x=e.getRawX();y=e.getRawY();px=params.x;py=params.y;return true;}if(e.getAction()==MotionEvent.ACTION_MOVE){params.x=px+(int)(e.getRawX()-x);params.y=py+(int)(e.getRawY()-y);floatingManager.updateViewLayout(frame,params);return true;}if(e.getAction()==MotionEvent.ACTION_UP){if(Math.abs(e.getRawX()-x)<12&&Math.abs(e.getRawY()-y)<12){long now=android.os.SystemClock.elapsedRealtime();if(now-lastTap<350)startActivity(new Intent(MainActivity.this,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));lastTap=now;}return true;}return false;}});
-        try{floatingManager.addView(frame,params);floatingContent=frame;}catch(Exception e){frame.removeView(content);host.addView(content);}
+        LinearLayout title=row();TextView label=new TextView(this);label.setText("TSBOT • Kéo để di chuyển");label.setTextColor(Color.WHITE);label.setPadding(dp(10),dp(10),0,dp(10));title.addView(label,new LinearLayout.LayoutParams(0,-2,1));
+        Button minimize=new Button(this);minimize.setText("−");minimize.setOnClickListener(v->moveTaskToBack(true));title.addView(minimize,new LinearLayout.LayoutParams(dp(52),dp(44)));
+        Button expand=new Button(this);expand.setText("□");expand.setOnClickListener(v->{windowExpanded=!windowExpanded;applyAppWindow();});title.addView(expand,new LinearLayout.LayoutParams(dp(52),dp(44)));
+        label.setOnTouchListener(new View.OnTouchListener(){float x,y;int px,py;public boolean onTouch(View v,MotionEvent e){WindowManager.LayoutParams p=getWindow().getAttributes();if(e.getAction()==MotionEvent.ACTION_DOWN){x=e.getRawX();y=e.getRawY();px=p.x;py=p.y;return true;}if(e.getAction()==MotionEvent.ACTION_MOVE){p.x=px+(int)(e.getRawX()-x);p.y=py+(int)(e.getRawY()-y);getWindow().setAttributes(p);return true;}return e.getAction()==MotionEvent.ACTION_UP;}});
+        frame.addView(title);frame.addView(content,new LinearLayout.LayoutParams(-1,0,1));return frame;
     }
-    private void restoreFloatingWindow(){
-        if(floatingContent==null)return;
-        LinearLayout frame=(LinearLayout)floatingContent;View content=frame.getChildAt(1);frame.removeView(content);
-        try{floatingManager.removeViewImmediate(frame);}catch(Exception ignored){}floatingContent=null;
-        ((ViewGroup)findViewById(android.R.id.content)).addView(content);
-    }
-    @Override protected void onResume(){super.onResume();restoreFloatingWindow();ensureFloatingPermission();handler.removeCallbacks(poll);handler.removeCallbacks(mapPoll);handler.post(poll);handler.post(mapPoll);} @Override protected void onPause(){showFloatingWindow();saveTrainSelection();if(floatingContent==null){handler.removeCallbacks(poll);handler.removeCallbacks(mapPoll);}super.onPause();}
-    @Override protected void onDestroy(){restoreFloatingWindow();handler.removeCallbacksAndMessages(null);try{unregisterReceiver(resultReceiver);}catch(Exception ignored){}io.getQueue().clear();io.shutdownNow();controlIo.getQueue().clear();controlIo.shutdownNow();mapIo.getQueue().clear();mapIo.shutdownNow();actionIo.getQueue().clear();actionIo.shutdownNow();super.onDestroy();}
+    @Override protected void onResume(){super.onResume();applyAppWindow();handler.removeCallbacks(poll);handler.removeCallbacks(mapPoll);handler.post(poll);handler.post(mapPoll);} @Override protected void onPause(){saveTrainSelection();handler.removeCallbacks(poll);handler.removeCallbacks(mapPoll);super.onPause();}
+    @Override protected void onDestroy(){handler.removeCallbacksAndMessages(null);try{unregisterReceiver(resultReceiver);}catch(Exception ignored){}io.getQueue().clear();io.shutdownNow();controlIo.getQueue().clear();controlIo.shutdownNow();mapIo.getQueue().clear();mapIo.shutdownNow();actionIo.getQueue().clear();actionIo.shutdownNow();super.onDestroy();}
 }

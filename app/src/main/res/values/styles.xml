@@ -9,6 +9,13 @@
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
+    <style name="FloatingAppTheme" parent="AppTheme">
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowCloseOnTouchOutside">false</item>
+    </style>
+
     <style name="TSBotEditText" parent="android:style/Widget.Material.EditText">
         <item name="android:background">@drawable/input_background</item>
         <item name="android:textColor">#F4F8FF</item>
